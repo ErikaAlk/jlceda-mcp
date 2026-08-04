@@ -102,8 +102,18 @@ export function wsUrl(port: number = resolvePort()): string {
 }
 
 export function resolvePort(): number {
-  const raw = Number(process.env.JLC_BRIDGE_PORT);
-  return Number.isFinite(raw) && raw > 0 && raw < 65536 ? Math.floor(raw) : DEFAULT_PORT;
+  const explicit = Number(process.env.JLC_BRIDGE_PORT);
+  if (Number.isFinite(explicit) && explicit > 0 && explicit < 65536) return Math.floor(explicit);
+
+  // 兼容旧配置：v0.1 的 ~/.claude.json 里写的是完整 URL（GATEWAY_WS_URL），
+  // 只认新变量的话，改过端口的人会被静默退回 18800 —— 又是一个不报错但结果是错的坑。
+  const legacy = process.env.GATEWAY_WS_URL;
+  if (legacy) {
+    const port = Number(legacy.match(/:(\d+)/)?.[1]);
+    if (Number.isFinite(port) && port > 0 && port < 65536) return Math.floor(port);
+  }
+
+  return DEFAULT_PORT;
 }
 
 /** 解析一帧。坏帧返回 undefined —— 调用方一律忽略，不要因为一帧坏了就断连接。 */

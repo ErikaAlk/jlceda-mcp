@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 19 项自动化测试
+npm test              # 23 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -180,7 +180,8 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   嘉立创EDA 自己的来源在白名单里
 - 命令结果只回给发起的那个客户端，不再广播
 - EDA 断线时在飞的命令立刻失败，不再干等 60 秒超时
-- 加了 19 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
+- 加了 23 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
+- 旧配置里的 `GATEWAY_WS_URL` 仍然认（只取里面的端口），换新版不用改 `~/.claude.json`
 
 ### v0.1.x
 
