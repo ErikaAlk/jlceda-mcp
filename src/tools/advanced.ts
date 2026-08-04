@@ -1,13 +1,19 @@
 import { z } from 'zod';
-import { BridgeClient } from '../bridge-client.js';
+import { BridgeLink } from '../link.js';
 
-export function registerAdvancedTools(server: any, bridge: BridgeClient) {
+export function registerAdvancedTools(server: any, bridge: BridgeLink) {
   server.tool('pcb_create_diff_pair', '创建差分对', {
     name: z.string().describe('差分对名称'),
     posNet: z.string().describe('正极网络名'),
     negNet: z.string().describe('负极网络名'),
   }, async ({ name, posNet, negNet }: { name: string; posNet: string; negNet: string }) => {
-    const data = await bridge.command('create_differential_pair', { name, posNet, negNet });
+    // 扩展侧的字段名是 positiveNet / negativeNet。旧版这里直接发 posNet/negNet，
+    // 扩展收不到就报「缺参数」，所以这个工具从来没成功过。
+    const data = await bridge.command('create_differential_pair', {
+      name,
+      positiveNet: posNet,
+      negativeNet: negNet,
+    });
     return { content: [{ type: 'text' as const, text: JSON.stringify(data ?? { success: true }, null, 2) }] };
   });
 

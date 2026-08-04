@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { BridgeClient } from '../bridge-client.js';
+import { BridgeLink } from '../link.js';
 
-export function registerCopperKeepoutTools(server: any, bridge: BridgeClient) {
+export function registerCopperKeepoutTools(server: any, bridge: BridgeLink) {
   server.tool('pcb_create_copper_pour', '创建矩形铺铜区域', {
     net: z.string().describe('网络名称（如 GND）'),
     layer: z.number().describe('层号 (1=顶层, 2=底层)'),

@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { BridgeClient } from './bridge-client.js';
+import { BridgeLink } from './link.js';
 import { calcImpedance, calcWidthForImpedance, calcTraceWidth, type ImpedanceType } from './calculators.js';
 
 const SYSTEM_PROMPT = `你是嘉立创 EDA PCB 设计专家。你可以通过工具直接操控 PCB 编辑器。
@@ -80,7 +80,7 @@ interface StepLog {
   durationMs: number;
 }
 
-function buildToolRegistry(bridge: BridgeClient): AgentTool[] {
+function buildToolRegistry(bridge: BridgeLink): AgentTool[] {
   const simple = (name: string, action: string, description: string) => ({
     name, description,
     input_schema: { type: 'object' as const, properties: {}, required: [] as string[] },
@@ -413,7 +413,7 @@ export interface AgentResult {
 }
 
 export async function runAgent(
-  bridge: BridgeClient,
+  bridge: BridgeLink,
   task: string,
   maxTurns = 20,
 ): Promise<AgentResult> {

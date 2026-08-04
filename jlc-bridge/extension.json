@@ -1,46 +1,77 @@
 {
   "name": "jlc-bridge",
   "uuid": "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6",
-  "displayName": "JLC Bridge",
-  "description": "OpenClaw remote control bridge extension for PCB automation",
-  "version": "0.1.13",
-  "publisher": "OpenClaw",
+  "displayName": "JLC MCP",
+  "description": "把 嘉立创EDA 接到 Claude Code —— 让 AI 直接读写 PCB 与原理图",
+  "version": "0.2.0",
+  "publisher": "Claude",
   "engines": {
-    "eda": "^2.3.0"
+    "eda": "^3.0.0"
   },
   "license": "Apache-2.0",
   "categories": "Other",
   "keywords": [
-    "OpenClaw",
+    "MCP",
+    "Claude",
     "PCB",
-    "Automation",
-    "Bridge"
+    "Automation"
   ],
   "activationEvents": {
-    "onStartupFinished": "activate"
+    "onStartupFinished": "activate",
+    "onEditorPcb": "activate",
+    "onEditorSchematic": "activate",
+    "onChangeAllowExternalInteractions": "on"
   },
   "entry": "index.js",
   "headerMenus": {
+    "home": [
+      {
+        "id": "jlcMcpBridge",
+        "title": "JLC MCP",
+        "menuItems": [
+          { "id": "status", "title": "状态 / 连接情况", "registerFn": "showStatus" },
+          null,
+          { "id": "reconnect", "title": "立即重连", "registerFn": "reconnectNow" },
+          { "id": "pause", "title": "暂停 / 恢复桥接", "registerFn": "togglePause" },
+          { "id": "port", "title": "连接端口…", "registerFn": "changePort" },
+          null,
+          { "id": "selftest", "title": "自检：读一次当前 PCB", "registerFn": "runSelfTest" },
+          { "id": "log", "title": "查看运行日志", "registerFn": "showLog" },
+          { "id": "help", "title": "连不上怎么办", "registerFn": "showHelp" }
+        ]
+      }
+    ],
+    "schematic": [
+      {
+        "id": "jlcMcpBridge",
+        "title": "JLC MCP",
+        "menuItems": [
+          { "id": "status", "title": "状态 / 连接情况", "registerFn": "showStatus" },
+          null,
+          { "id": "reconnect", "title": "立即重连", "registerFn": "reconnectNow" },
+          { "id": "pause", "title": "暂停 / 恢复桥接", "registerFn": "togglePause" },
+          { "id": "port", "title": "连接端口…", "registerFn": "changePort" },
+          null,
+          { "id": "selftest", "title": "自检：读一次当前 PCB", "registerFn": "runSelfTest" },
+          { "id": "log", "title": "查看运行日志", "registerFn": "showLog" },
+          { "id": "help", "title": "连不上怎么办", "registerFn": "showHelp" }
+        ]
+      }
+    ],
     "pcb": [
       {
-        "id": "JLCBridge",
-        "title": "JLC Bridge",
+        "id": "jlcMcpBridge",
+        "title": "JLC MCP",
         "menuItems": [
-          {
-            "id": "toggleBridge",
-            "title": "Enable/Disable Bridge",
-            "registerFn": "toggleBridge"
-          },
-          {
-            "id": "status",
-            "title": "Status",
-            "registerFn": "showStatus"
-          },
-          {
-            "id": "testCommand",
-            "title": "Test Command",
-            "registerFn": "testCommand"
-          }
+          { "id": "status", "title": "状态 / 连接情况", "registerFn": "showStatus" },
+          null,
+          { "id": "reconnect", "title": "立即重连", "registerFn": "reconnectNow" },
+          { "id": "pause", "title": "暂停 / 恢复桥接", "registerFn": "togglePause" },
+          { "id": "port", "title": "连接端口…", "registerFn": "changePort" },
+          null,
+          { "id": "selftest", "title": "自检：读一次当前 PCB", "registerFn": "runSelfTest" },
+          { "id": "log", "title": "查看运行日志", "registerFn": "showLog" },
+          { "id": "help", "title": "连不上怎么办", "registerFn": "showHelp" }
         ]
       }
     ]

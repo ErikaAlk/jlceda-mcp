@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import { BridgeClient } from '../bridge-client.js';
+import { BridgeLink } from '../link.js';
 import { runAgent } from '../agent.js';
 
-export function registerAgentTools(server: any, bridge: BridgeClient) {
+export function registerAgentTools(server: any, bridge: BridgeLink) {
   // Only register if ANTHROPIC_API_KEY is available
   if (!process.env.ANTHROPIC_API_KEY) return;
 
