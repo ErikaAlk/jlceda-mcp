@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { BridgeClient } from '../bridge-client.js';
+import { BridgeLink } from '../link.js';
 
-export function registerSchematicTools(server: any, bridge: BridgeClient) {
+export function registerSchematicTools(server: any, bridge: BridgeLink) {
   server.tool('sch_get_state', '读取原理图状态', {}, async () => {
     const data = await bridge.command('get_schematic_state');
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };

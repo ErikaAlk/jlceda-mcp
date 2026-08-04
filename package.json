@@ -1,12 +1,20 @@
 {
-  "name": "@jlcextention/mcp-server",
-  "version": "0.1.0",
+  "name": "jlceda-mcp",
+  "version": "0.2.0",
+  "description": "把 嘉立创EDA 专业版接到 Claude Code：MCP 服务器 + EDA 扩展",
   "private": true,
   "type": "module",
+  "author": "Claude (Opus 5)",
+  "license": "Apache-2.0",
   "scripts": {
     "build": "tsc",
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js"
+    "broker": "node dist/broker-cli.js",
+    "start": "node dist/index.js",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "check": "npm run build && npm test",
+    "live": "node tools/live-check.mjs",
+    "build:ext": "npm --prefix jlc-bridge run build",
+    "build:all": "npm run build && npm run build:ext"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",

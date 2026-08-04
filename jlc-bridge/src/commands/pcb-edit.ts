@@ -1,0 +1,555 @@
+// PCB 写操作：元件搬移、走线、过孔、禁布区、铺铜、差分对/等长组。
+//
+// 这里几个 create 用了「候选参数组合逐个试」的笨办法（keepout / pour）。
+// 不是写着玩的：pcb_PrimitiveRegion.create / pcb_PrimitivePour.create 的签名在
+// 不同 EDA 小版本之间变过，多边形对象的构造方式也有两套（createPolygon / 直接给数组），
+// 试一遍是唯一能跨版本工作的做法。别「优化」成只试一种。
+
+import { edaApi, delay } from '../eda';
+import {
+  getPrimitiveId,
+  makeRectPolygonSource,
+  makeRectPolygonSourceR,
+  normalizeNetArray,
+  parsePrimitiveIds,
+  getRectParams,
+  toFinite,
+} from './util';
+
+// ─── 元件 ───
+
+async function findComponentRow(designator: string): Promise<{ id: string; row: any }> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveComponent?.getAll || !api?.pcb_PrimitiveComponent?.modify) {
+    throw new Error('这版 嘉立创EDA 不支持修改元件');
+  }
+  const rows = await api.pcb_PrimitiveComponent.getAll();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if ((row?.getState_Designator?.() || '') === designator) {
+      const id = row?.getState_PrimitiveId?.() || '';
+      if (id) return { id, row };
+    }
+  }
+  throw new Error(`找不到元件：${designator}`);
+}
+
+export async function moveComponent(params: {
+  designator: string;
+  x: number;
+  y: number;
+  rotation?: number;
+}): Promise<any> {
+  const api = edaApi();
+  const { id, row } = await findComponentRow(params.designator);
+  if (row?.getState_PrimitiveLock?.()) throw new Error(`元件被锁定：${params.designator}`);
+
+  const rotation = params.rotation ?? row?.getState_Rotation?.() ?? 0;
+  await api.pcb_PrimitiveComponent.modify(id, { x: params.x, y: params.y, rotation });
+  return { moved: params.designator, x: params.x, y: params.y, rotation };
+}
+
+/** 搬迁元件：先把直接连到它焊盘上的走线删掉，再移动，避免留下一堆斜拉的残线。 */
+export async function relocateComponent(params: {
+  designator: string;
+  x: number;
+  y: number;
+  rotation?: number;
+}): Promise<any> {
+  const api = edaApi();
+  const { id: targetId, row: targetRow } = await findComponentRow(params.designator);
+  if (targetRow?.getState_PrimitiveLock?.()) throw new Error(`元件被锁定：${params.designator}`);
+
+  const uniqueNets = normalizeNetArray(targetRow?.getState_Pads?.());
+
+  const padPositions: { x: number; y: number }[] = [];
+  if (api?.pcb_PrimitivePad?.getAll) {
+    try {
+      const allPads = await api.pcb_PrimitivePad.getAll();
+      for (const p of Array.isArray(allPads) ? allPads : []) {
+        const des = p?.getState_Designator?.() || '';
+        const parentId =
+          p?.getState_ParentPrimitiveId?.() ||
+          p?.getState_BelongPrimitiveId?.() ||
+          p?.getState_ComponentPrimitiveId?.() ||
+          '';
+        if (des === params.designator || parentId === targetId) {
+          padPositions.push({
+            x: Number(p?.getState_X?.() ?? p?.getState_CenterX?.() ?? 0),
+            y: Number(p?.getState_Y?.() ?? p?.getState_CenterY?.() ?? 0),
+          });
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const deletedTracks: string[] = [];
+  const COORD_TOLERANCE = 2; // mil
+  if (api?.pcb_PrimitiveLine?.getAll && api?.pcb_PrimitiveLine?.delete && padPositions.length > 0) {
+    for (const net of uniqueNets) {
+      try {
+        const trackRows = await api.pcb_PrimitiveLine.getAll(net);
+        const toDelete: string[] = [];
+        for (const t of Array.isArray(trackRows) ? trackRows : []) {
+          const sx = Number(t?.getState_StartX?.() ?? 0);
+          const sy = Number(t?.getState_StartY?.() ?? 0);
+          const ex = Number(t?.getState_EndX?.() ?? 0);
+          const ey = Number(t?.getState_EndY?.() ?? 0);
+          const touchesPad = padPositions.some(
+            (pad) =>
+              (Math.abs(sx - pad.x) <= COORD_TOLERANCE && Math.abs(sy - pad.y) <= COORD_TOLERANCE) ||
+              (Math.abs(ex - pad.x) <= COORD_TOLERANCE && Math.abs(ey - pad.y) <= COORD_TOLERANCE),
+          );
+          if (touchesPad) {
+            const id = t?.getState_PrimitiveId?.();
+            if (id) toDelete.push(id);
+          }
+        }
+        if (toDelete.length > 0) {
+          await api.pcb_PrimitiveLine.delete(toDelete as any);
+          deletedTracks.push(...toDelete);
+        }
+      } catch {
+        /* 单个网络失败不影响其它 */
+      }
+    }
+  }
+
+  const rotation = params.rotation ?? targetRow?.getState_Rotation?.() ?? 0;
+  await api.pcb_PrimitiveComponent.modify(targetId, { x: params.x, y: params.y, rotation });
+
+  return {
+    moved: params.designator,
+    x: params.x,
+    y: params.y,
+    rotation,
+    deletedTracks,
+    deletedTrackCount: deletedTracks.length,
+    netsToReroute: uniqueNets,
+  };
+}
+
+export async function selectComponent(params: { designator: string }): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_SelectControl?.selectByDesignator) throw new Error('这版 嘉立创EDA 不支持按位号选中');
+  await api.pcb_SelectControl.selectByDesignator(params.designator);
+  return { selected: params.designator };
+}
+
+export async function deleteSelected(): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_SelectControl?.deleteSelected) throw new Error('这版 嘉立创EDA 不支持删除选中项');
+  await api.pcb_SelectControl.deleteSelected();
+  return { deleted: true };
+}
+
+export async function createPcbComponent(params: {
+  component: { libraryUuid: string; uuid: string };
+  layer: number;
+  x: number;
+  y: number;
+  rotation?: number;
+}): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveComponent?.create) throw new Error('这版 嘉立创EDA 不支持放置元件');
+  const { component, layer, x, y, rotation } = params;
+  if (!component?.libraryUuid || !component?.uuid) {
+    throw new Error('需要 component.libraryUuid 和 component.uuid');
+  }
+  const result = await api.pcb_PrimitiveComponent.create(
+    { libraryUuid: component.libraryUuid, uuid: component.uuid },
+    layer,
+    x,
+    y,
+    rotation ?? 0,
+    false,
+  );
+  return {
+    primitiveId: result?.getState_PrimitiveId?.() || result?.primitiveId || '',
+    designator: result?.getState_Designator?.() || result?.designator || '',
+  };
+}
+
+// ─── 走线 / 过孔 ───
+
+export async function routeTrack(params: {
+  net: string;
+  points: Array<{ x: number; y: number }>;
+  layer: number;
+  width?: number;
+}): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveLine?.create) throw new Error('这版 嘉立创EDA 不支持画走线');
+
+  const points = Array.isArray(params?.points) ? params.points : [];
+  if (points.length < 2) throw new Error('points 至少要两个点');
+
+  const width = params.width ?? 10;
+  const created: string[] = [];
+  const failed: Array<{ index: number; error: string }> = [];
+
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    try {
+      const line = await api.pcb_PrimitiveLine.create(
+        params.net,
+        params.layer,
+        p1.x,
+        p1.y,
+        p2.x,
+        p2.y,
+        width,
+        false,
+      );
+      created.push(getPrimitiveId(line));
+    } catch (error) {
+      // 旧版只往 console 打一句就算了，调用方看到 createdSegments 少了也不知道为什么。
+      failed.push({ index: i, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  return {
+    createdSegments: created.length,
+    primitiveIds: created.filter(Boolean),
+    failedSegments: failed,
+  };
+}
+
+export async function deleteTracks(params: any): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveLine?.delete) throw new Error('这版 嘉立创EDA 不支持删除走线');
+  const primitiveIds = parsePrimitiveIds(params);
+  const ok = await api.pcb_PrimitiveLine.delete(primitiveIds as any);
+  return { deleted: Boolean(ok), primitiveIds: toArray(primitiveIds) };
+}
+
+/**
+ * 建过孔。
+ * holeDiameter 兼容 drill 这个名字 —— MCP 那边的 pcb_create_via 一直传 drill，
+ * 而这边只认 holeDiameter，于是钻孔尺寸被静默丢掉、全部按默认 10mil 建。
+ */
+export async function createVia(params: {
+  net: string;
+  x: number;
+  y: number;
+  holeDiameter?: number;
+  drill?: number;
+  diameter?: number;
+  viaType?: number;
+  primitiveLock?: boolean;
+}): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveVia?.create) throw new Error('这版 嘉立创EDA 不支持建过孔');
+
+  const net = String(params?.net || '').trim();
+  if (!net) throw new Error('需要 net');
+
+  const x = toFinite(params?.x, NaN);
+  const y = toFinite(params?.y, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('需要 x/y');
+
+  const holeRaw = params?.holeDiameter ?? params?.drill;
+  const holeDiameter = Math.max(1, toFinite(holeRaw, 10));
+  const diameter = Math.max(holeDiameter + 1, toFinite(params?.diameter, 22));
+  const viaType = Number.isFinite(Number(params?.viaType)) ? Number(params.viaType) : undefined;
+  const primitiveLock = Boolean(params?.primitiveLock);
+
+  const via = await api.pcb_PrimitiveVia.create(
+    net,
+    x,
+    y,
+    holeDiameter,
+    diameter,
+    viaType,
+    undefined,
+    undefined,
+    primitiveLock,
+  );
+  return {
+    primitiveId: getPrimitiveId(via),
+    net,
+    x,
+    y,
+    holeDiameter,
+    diameter,
+    viaType: viaType ?? null,
+  };
+}
+
+export async function deleteVia(params: any): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveVia?.delete) throw new Error('这版 嘉立创EDA 不支持删除过孔');
+  const primitiveIds = parsePrimitiveIds(params);
+  const ok = await api.pcb_PrimitiveVia.delete(primitiveIds as any);
+  return { deleted: Boolean(ok), primitiveIds: toArray(primitiveIds) };
+}
+
+// ─── 禁布区 / 铺铜 ───
+
+function buildRectPolygonCandidates(rect: {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}): any[] {
+  const api = edaApi();
+  const sourceLine = makeRectPolygonSource(rect.x1, rect.y1, rect.x2, rect.y2);
+  const sourceRect = makeRectPolygonSourceR(rect.x1, rect.y1, rect.x2, rect.y2);
+  const list: any[] = [];
+  const add = (item: any) => {
+    if (item) list.push(item);
+  };
+  add(api?.pcb_MathPolygon?.createPolygon?.(sourceLine as any));
+  add(api?.pcb_MathPolygon?.createPolygon?.(sourceRect as any));
+  add(api?.pcb_MathPolygon?.createComplexPolygon?.(sourceLine as any));
+  add(api?.pcb_MathPolygon?.createComplexPolygon?.(sourceRect as any));
+  add(sourceLine as any);
+  add(sourceRect as any);
+  return list;
+}
+
+export async function createKeepoutRect(params: any): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveRegion?.create || !api?.pcb_MathPolygon?.createPolygon) {
+    throw new Error('这版 嘉立创EDA 不支持建禁布区');
+  }
+
+  const rect = getRectParams(params);
+  const requestedLayer = Number.isFinite(Number(params?.layer)) ? Number(params.layer) : 12;
+  const ruleTypes =
+    Array.isArray(params?.ruleTypes) && params.ruleTypes.length > 0
+      ? params.ruleTypes.map((i: any) => Number(i)).filter((i: number) => Number.isFinite(i))
+      : [2, 3, 5, 6, 7];
+  const regionName = String(params?.regionName || `KEEP_OUT_${Date.now()}`);
+  const lineWidth = Math.max(0, toFinite(params?.lineWidth, 4));
+  const primitiveLock = Boolean(params?.primitiveLock);
+
+  const attempt = await tryCombinations(
+    [
+      Array.from(new Set([requestedLayer, 12, 1, 2])),
+      buildRectPolygonCandidates(rect),
+      [ruleTypes, [5], [2, 3, 5, 6, 7], undefined],
+      [regionName, undefined],
+      [lineWidth, undefined],
+    ],
+    ([layer, polygon, rt, rn, lw]) =>
+      api.pcb_PrimitiveRegion.create(layer, polygon, rt, rn, lw, primitiveLock),
+    '建禁布区失败',
+  );
+
+  const [usedLayer, , usedRuleTypes, usedName, usedLineWidth] = attempt.args;
+  return {
+    primitiveId: getPrimitiveId(attempt.value),
+    layer: usedLayer,
+    ruleTypes: Array.isArray(usedRuleTypes) ? usedRuleTypes : [],
+    regionName: usedName || '',
+    lineWidth: Number.isFinite(Number(usedLineWidth)) ? Number(usedLineWidth) : null,
+    rect,
+  };
+}
+
+export async function deleteRegion(params: any): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveRegion?.delete) throw new Error('这版 嘉立创EDA 不支持删除禁布区');
+  const primitiveIds = parsePrimitiveIds(params);
+  const ok = await api.pcb_PrimitiveRegion.delete(primitiveIds as any);
+  return { deleted: Boolean(ok), primitiveIds: toArray(primitiveIds) };
+}
+
+export async function createPourRect(params: any): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitivePour?.create || !api?.pcb_MathPolygon?.createPolygon) {
+    throw new Error('这版 嘉立创EDA 不支持铺铜');
+  }
+
+  const net = String(params?.net || '').trim();
+  if (!net) throw new Error('需要 net');
+  const rect = getRectParams(params);
+  const requestedLayer = Number.isFinite(Number(params?.layer)) ? Number(params.layer) : 1;
+  const fillMethod = String(params?.fillMethod || 'solid').trim().toLowerCase();
+  const preserveSilos = Boolean(params?.preserveSilos);
+  const pourName = String(params?.pourName || `POUR_${net}_${Date.now()}`);
+  const pourPriority = Math.max(1, Math.floor(toFinite(params?.pourPriority, 1)));
+  const lineWidth = Math.max(0, toFinite(params?.lineWidth, 8));
+  const primitiveLock = Boolean(params?.primitiveLock);
+
+  const attempt = await tryCombinations(
+    [
+      Array.from(new Set([requestedLayer, 1, 2])),
+      buildRectPolygonCandidates(rect),
+      Array.from(new Set([fillMethod, 'solid', undefined])),
+      Array.from(new Set([preserveSilos, false, true])),
+      [pourName, undefined],
+      [pourPriority, undefined],
+      [lineWidth, undefined],
+    ],
+    ([layer, polygon, fm, ps, pn, pp, lw]) =>
+      api.pcb_PrimitivePour.create(net, layer, polygon, fm, ps, pn, pp, lw, primitiveLock),
+    '铺铜失败',
+  );
+
+  const [usedLayer, , usedFill, usedPreserve, usedName, usedPriority, usedLineWidth] = attempt.args;
+  return {
+    primitiveId: getPrimitiveId(attempt.value),
+    net,
+    layer: usedLayer,
+    fillMethod: usedFill || '',
+    preserveSilos: Boolean(usedPreserve),
+    pourName: usedName || '',
+    pourPriority: Number.isFinite(Number(usedPriority)) ? Number(usedPriority) : null,
+    lineWidth: Number.isFinite(Number(usedLineWidth)) ? Number(usedLineWidth) : null,
+    rect,
+  };
+}
+
+export async function deletePour(params: any): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitivePour?.delete) throw new Error('这版 嘉立创EDA 不支持删除铺铜');
+  const primitiveIds = parsePrimitiveIds(params);
+  const ok = await api.pcb_PrimitivePour.delete(primitiveIds as any);
+  return { deleted: Boolean(ok), primitiveIds: toArray(primitiveIds) };
+}
+
+// ─── 差分对 / 等长组 ───
+
+export async function createDifferentialPair(params: any): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_Drc?.createDifferentialPair) throw new Error('这版 嘉立创EDA 不支持差分对');
+
+  const name = String(params?.name || '').trim();
+  // posNet/negNet 是 MCP 侧一直在用的名字；旧版这边只认 positiveNet/negativeNet，
+  // 于是这个工具从来没成功过，每次都报「缺参数」。两套名字都收。
+  const positiveNet = String(params?.positiveNet ?? params?.posNet ?? '').trim();
+  const negativeNet = String(params?.negativeNet ?? params?.negNet ?? '').trim();
+  if (!name || !positiveNet || !negativeNet) {
+    throw new Error('需要 name / positiveNet(posNet) / negativeNet(negNet)');
+  }
+  const ok = await api.pcb_Drc.createDifferentialPair(name, positiveNet, negativeNet);
+  return { created: Boolean(ok), name, positiveNet, negativeNet };
+}
+
+export async function deleteDifferentialPair(params: { name: string }): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_Drc?.deleteDifferentialPair) throw new Error('这版 嘉立创EDA 不支持差分对');
+  const name = String(params?.name || '').trim();
+  if (!name) throw new Error('需要 name');
+  return { deleted: Boolean(await api.pcb_Drc.deleteDifferentialPair(name)), name };
+}
+
+export async function listDifferentialPairs(): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_Drc?.getAllDifferentialPairs) throw new Error('这版 嘉立创EDA 不支持差分对');
+  const rows = await api.pcb_Drc.getAllDifferentialPairs();
+  const pairs = (Array.isArray(rows) ? rows : []).map((row: any) => ({
+    name: String(row?.name || ''),
+    positiveNet: String(row?.positiveNet || ''),
+    negativeNet: String(row?.negativeNet || ''),
+  }));
+  return { totalPairs: pairs.length, pairs };
+}
+
+export async function createEqualLengthGroup(params: any): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_Drc?.createEqualLengthNetGroup) throw new Error('这版 嘉立创EDA 不支持等长组');
+  const name = String(params?.name || '').trim();
+  const nets = Array.isArray(params?.nets)
+    ? params.nets.map((i: any) => String(i || '').trim()).filter(Boolean)
+    : [];
+  if (!name || nets.length === 0) throw new Error('需要 name 和 nets');
+  const color = params?.color || { r: 255, g: 128, b: 0, alpha: 1 };
+  return {
+    created: Boolean(await api.pcb_Drc.createEqualLengthNetGroup(name, nets, color)),
+    name,
+    nets,
+    color,
+  };
+}
+
+export async function deleteEqualLengthGroup(params: { name: string }): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_Drc?.deleteEqualLengthNetGroup) throw new Error('这版 嘉立创EDA 不支持等长组');
+  const name = String(params?.name || '').trim();
+  if (!name) throw new Error('需要 name');
+  return { deleted: Boolean(await api.pcb_Drc.deleteEqualLengthNetGroup(name)), name };
+}
+
+export async function listEqualLengthGroups(): Promise<any> {
+  const api = edaApi();
+  if (!api?.pcb_Drc?.getAllEqualLengthNetGroups) throw new Error('这版 嘉立创EDA 不支持等长组');
+  const rows = await api.pcb_Drc.getAllEqualLengthNetGroups();
+  const groups = (Array.isArray(rows) ? rows : []).map((row: any) => ({
+    name: String(row?.name || ''),
+    nets: Array.isArray(row?.nets) ? row.nets : [],
+    color: row?.color || null,
+  }));
+  return { totalGroups: groups.length, groups };
+}
+
+// ─── 文档 ───
+
+export async function getBoardInfo(): Promise<any> {
+  const api = edaApi();
+  if (!api?.dmt_Board?.getCurrentBoardInfo) {
+    throw new Error('这版 嘉立创EDA 不支持读取工程信息');
+  }
+  const info = await api.dmt_Board.getCurrentBoardInfo();
+  return {
+    name: String(info?.name || info?.title || ''),
+    schematicUuid: String(info?.schematicUuid || info?.schUuid || info?.sch?.uuid || ''),
+    pcbUuid: String(info?.pcbUuid || info?.pcb?.uuid || ''),
+    raw: info ?? null,
+  };
+}
+
+export async function openDocument(params: { uuid: string }): Promise<any> {
+  const api = edaApi();
+  if (!api?.dmt_EditorControl?.openDocument) throw new Error('这版 嘉立创EDA 不支持切换文档');
+  const uuid = String(params?.uuid || '').trim();
+  if (!uuid) throw new Error('需要 uuid');
+  await api.dmt_EditorControl.openDocument(uuid);
+  await delay(500); // 等文档加载，后面紧接着读数据的场景很常见
+  return { opened: uuid };
+}
+
+// ─── 内部 ───
+
+function toArray(ids: string | string[]): string[] {
+  return Array.isArray(ids) ? ids : [ids];
+}
+
+/**
+ * 笛卡尔积逐个试，第一个不抛异常且返回真值的组合胜出。
+ * 全试完还不行就把最后一次的异常抛出去 —— 别静默返回 null，那样上层完全不知道发生了什么。
+ */
+async function tryCombinations(
+  candidateLists: any[][],
+  invoke: (args: any[]) => Promise<any>,
+  failMessage: string,
+): Promise<{ value: any; args: any[] }> {
+  let lastError: unknown = null;
+  const total = candidateLists.reduce((acc, list) => acc * Math.max(1, list.length), 1);
+
+  for (let index = 0; index < total; index += 1) {
+    const args: any[] = [];
+    let rest = index;
+    for (const list of candidateLists) {
+      const size = Math.max(1, list.length);
+      args.push(list[rest % size]);
+      rest = Math.floor(rest / size);
+    }
+    try {
+      const value = await invoke(args);
+      if (value) return { value, args };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastError) {
+    const detail = lastError instanceof Error ? lastError.message : String(lastError);
+    throw new Error(`${failMessage}：${detail}`);
+  }
+  throw new Error(`${failMessage}：所有参数组合都被 嘉立创EDA 拒绝了`);
+}

@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { BridgeClient } from '../bridge-client.js';
+import { BridgeLink } from '../link.js';
 
-export function registerComponentTools(server: any, bridge: BridgeClient) {
+export function registerComponentTools(server: any, bridge: BridgeLink) {
   server.tool('pcb_move_component', '移动元件到指定坐标 (mil)', {
     designator: z.string().describe('元件位号，如 U1, R1'),
     x: z.number().describe('X 坐标 (mil)'),

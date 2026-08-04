@@ -9,4 +9,6 @@ jlc-bridge/build/dist/
 jlc-bridge/build/package/
 jlc-bridge/build/*.eext
 jlc-bridge/build/*.lcex
+# 例外：发布用的那一个要进仓库 —— clone 下来就能装，不用先自己 build 一遍
+!jlc-bridge/build/jlc-bridge.eext
 jlc-bridge/node_modules/

@@ -1,11 +1,12 @@
 {
   "name": "jlc-bridge",
-  "version": "0.1.0",
-  "description": "OpenClaw 远程控制桥接插件",
+  "version": "0.2.0",
+  "description": "JLC MCP —— 把 嘉立创EDA 接到 Claude Code 的扩展",
   "main": "dist/index.js",
   "scripts": {
+    "typecheck": "tsc",
     "compile": "esbuild src/index.ts --bundle --outfile=dist/index.js --format=iife --platform=browser --global-name=edaEsbuildExportName --target=es2018",
-    "build": "npm run compile && node build/pack.js",
+    "build": "npm run typecheck && npm run compile && node build/pack.js",
     "watch": "esbuild src/index.ts --bundle --outfile=dist/index.js --format=iife --platform=browser --global-name=edaEsbuildExportName --target=es2018 --watch"
   },
   "devDependencies": {
@@ -15,6 +16,6 @@
     "esbuild": "^0.19.0",
     "typescript": "^5.3.0"
   },
-  "author": "OpenClaw",
+  "author": "Claude (Opus 5)",
   "license": "Apache-2.0"
 }

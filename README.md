@@ -1,265 +1,200 @@
-# jlceda-mcp-server
-# 本项目上传的文件完全由opus4.6完成，有问题请问agent
-嘉立创 EDA MCP Server — 让 AI 编程助手直接操控嘉立创 EDA 的 PCB 自动化工具集。
+# jlceda-mcp —— 让 Claude Code 直接操作 嘉立创EDA 专业版
 
-通过 [Model Context Protocol](https://modelcontextprotocol.io/) 暴露 39 个 PCB/原理图工具，在 Claude Code / Cursor / Windsurf 等 AI IDE 中直接执行元件移动、走线、铺铜、DRC 等操作。内置 PCB Agent 可自主编排多步操作完成复杂任务。
-
-## 架构
+把 嘉立创EDA 专业版接到 Claude Code：读 PCB / 原理图、移元件、走线、打过孔、铺铜、
+跑 DRC、排丝印，全都可以让 AI 直接做。
 
 ```
-AI IDE ──stdio──> mcp-server ──WebSocket──> gateway ──> jlc-bridge 插件 ──> 嘉立创 EDA
+Claude Code ⇄ mcp-server（内含 broker） ⇄ 嘉立创EDA 的 JLC MCP 扩展
 ```
 
-MCP server 通过 stdio 与 AI IDE 通信，内部维护 WebSocket 连接到 gateway 的 `/ws/bridge` 端点，转发命令给 jlc-bridge 插件控制 EDA 编辑器。
+**只有两段。** 不需要额外启动任何东西 —— 起 Claude Code 就等于起了桥接服务。
 
-本仓库包含两个组件：
-- `src/` — MCP Server（Node.js，39 个 PCB/原理图工具 + Agent）
-- `jlc-bridge/` — 嘉立创 EDA 扩展插件（运行在 EDA 内部，执行实际操作）
+---
 
-## 前置条件
+## 快速开始
 
-- Node.js >= 18
-- gateway 运行中（默认端口 18800）
-- jlc-bridge 插件已连接嘉立创 EDA
+### 1. 装扩展（只做一次）
 
-## 安装 & 构建
+嘉立创EDA → 顶部菜单 **高级 → 扩展管理器 → 导入**，选：
 
-```bash
-npm install
-npm run build
+```
+jlc-bridge/build/jlc-bridge.eext
 ```
 
-## 配置
+装完在「配置」里确认 **允许外部交互** 是勾上的（默认就是勾上的）。
+没有这个权限扩展连不出去，重试多少次都没用。
 
-在你的项目目录下创建 `.mcp.json`：
+### 2. 配 Claude Code（只做一次）
+
+用户级 `~/.claude.json` 里加：
 
 ```json
 {
   "mcpServers": {
     "jlceda": {
+      "type": "stdio",
       "command": "node",
-      "args": ["<path-to>/jlceda-mcp-server/dist/index.js"],
-      "env": {
-        "GATEWAY_WS_URL": "ws://127.0.0.1:18800/ws/bridge",
-        "ANTHROPIC_API_KEY": "sk-ant-..."
-      }
+      "args": ["C:/Users/你的用户名/Documents/jlcmcp/dist/index.js"]
     }
   }
 }
 ```
 
-配置完成后重启 AI IDE，即可在对话中使用所有工具。
+改完 **重启 Claude Code** 才生效。
 
-## 环境变量
+### 3. 用
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `GATEWAY_WS_URL` | `ws://127.0.0.1:18800/ws/bridge` | Gateway WebSocket 地址 |
-| `ANTHROPIC_API_KEY` | — | Anthropic API Key（设置后启用 pcb_agent 工具） |
-| `AGENT_MODEL` | `claude-sonnet-4-20250514` | Agent 使用的模型 |
+打开 EDA，打开一个 PCB，看顶部菜单 **JLC MCP** 第一行：
 
-## 工具清单 (39 个)
+| 显示 | 意思 |
+|---|---|
+| ● 已连接 · Claude 可以操作这块板 | 好了，直接让 Claude 干活 |
+| ○ 未连接 · Claude Code 开着吗 | Claude Code 没开，或它的 MCP 进程没起来 |
+| ⚠ 缺少「外部交互」权限 | 去扩展管理器把那个勾勾上 |
+| ⏸ 已暂停 | 你自己按的暂停，点「恢复桥接」 |
 
-### 状态查询 (9)
+**状态就写在菜单标题上，不用点开任何窗口。** 连上一般在 3 秒内自动完成。
 
-| 工具 | 说明 |
-|------|------|
-| `pcb_get_state` | 获取 PCB 完整状态（元件、网络、板框） |
-| `pcb_screenshot` | 截取编辑器截图（base64 PNG） |
-| `pcb_run_drc` | 运行 PCB 设计规则检查 |
-| `pcb_get_tracks` | 查询走线段，可按网络/层过滤 |
-| `pcb_get_pads` | 查询焊盘信息，可按位号过滤 |
-| `pcb_get_net_primitives` | 查询指定网络的所有图元 |
-| `pcb_get_board_info` | 获取工程信息 |
-| `pcb_get_feature_support` | 查询 bridge 支持的功能列表 |
-| `pcb_ping` | 检查 bridge 连接状态 |
+---
 
-### 元件操作 (6)
+## 它能做什么
 
-| 工具 | 说明 |
-|------|------|
-| `pcb_move_component` | 移动元件到指定坐标 |
-| `pcb_relocate_component` | 安全搬迁元件（自动断开走线） |
-| `pcb_batch_move` | 批量移动多个元件 |
-| `pcb_select_component` | 在编辑器中选中元件 |
-| `pcb_delete_selected` | 删除当前选中的对象 |
-| `pcb_create_component` | 从库中放置元件到 PCB |
+38 个工具，Claude 直接调用：
 
-### 走线 / 过孔 (4)
+| 组 | 工具 |
+|---|---|
+| 读状态 | `pcb_get_state` `pcb_get_pads` `pcb_get_tracks` `pcb_get_net_primitives` `pcb_get_board_info` `pcb_get_silkscreens` `pcb_screenshot` |
+| 元件 | `pcb_move_component` `pcb_relocate_component`（自动断线）`pcb_batch_move` `pcb_select_component` `pcb_create_component` `pcb_delete_selected` |
+| 布线 | `pcb_route_track` `pcb_create_via` `pcb_delete_tracks` `pcb_delete_via` |
+| 铜箔 | `pcb_create_copper_pour` `pcb_create_keepout` `pcb_delete_pour` `pcb_delete_keepout` |
+| 规则 | `pcb_create_diff_pair` `pcb_create_equal_length` + 各自的 list / delete |
+| 丝印 | `pcb_move_silkscreen` `pcb_auto_silkscreen`（自动避让焊盘 / 过孔 / 其它丝印） |
+| 检查 | `pcb_run_drc` `sch_run_drc` |
+| 原理图 | `sch_get_state` `sch_get_netlist` `pcb_open_document` |
+| 计算 | `calc_impedance`（含反算线宽）`calc_trace_width`（IPC-2221） |
+| 诊断 | `pcb_ping` `pcb_get_feature_support` `bridge_status` |
 
-| 工具 | 说明 |
-|------|------|
-| `pcb_route_track` | 画走线（指定网络、路径点、层、线宽） |
-| `pcb_create_via` | 创建过孔 |
-| `pcb_delete_tracks` | 删除走线 |
-| `pcb_delete_via` | 删除过孔 |
+`bridge_status` **不需要 EDA 在线也能回答** —— 专门用来分辨「是 EDA 没连上」还是「命令本身失败」。
 
-### 铺铜 / 禁布区 (4)
+另有 `pcb_agent`（黑箱自动模式），需要额外的 `ANTHROPIC_API_KEY`，默认不注册。
 
-| 工具 | 说明 |
-|------|------|
-| `pcb_create_copper_pour` | 创建矩形铺铜区域 |
-| `pcb_delete_pour` | 删除铺铜 |
-| `pcb_create_keepout` | 创建矩形禁布区 |
-| `pcb_delete_keepout` | 删除禁布区 |
+---
 
-### 丝印 (3)
+## 出问题时
 
-| 工具 | 说明 |
-|------|------|
-| `pcb_get_silkscreens` | 查询所有丝印文字 |
-| `pcb_move_silkscreen` | 移动丝印 |
-| `pcb_auto_silkscreen` | 自动排列丝印（避免重叠） |
+菜单里有四个自查入口，从上往下用：
 
-### 高级约束 (6)
+1. **状态** —— 秒开，显示连了多久、收发了多少、最近的错误是什么
+2. **自检：读一次当前 PCB** —— 不碰网络。它成功而链路没通 ⇒ 问题在 Claude Code 那侧
+3. **查看运行日志** —— 扩展自己的日志，连不上时把它发给 Claude 看
+4. **连不上怎么办** —— 按顺序列出四种常见原因
 
-| 工具 | 说明 |
-|------|------|
-| `pcb_create_diff_pair` | 创建差分对 |
-| `pcb_list_diff_pairs` | 列出所有差分对 |
-| `pcb_delete_diff_pair` | 删除差分对 |
-| `pcb_create_equal_length` | 创建等长组 |
-| `pcb_list_equal_lengths` | 列出所有等长组 |
-| `pcb_delete_equal_length` | 删除等长组 |
-
-### 原理图 / 文档 (4)
-
-| 工具 | 说明 |
-|------|------|
-| `sch_get_state` | 读取原理图状态 |
-| `sch_get_netlist` | 导出网表 |
-| `sch_run_drc` | 运行原理图 DRC |
-| `pcb_open_document` | 切换到指定文档（原理图或 PCB） |
-
-### PCB Agent (1)
-
-| 工具 | 说明 |
-|------|------|
-| `pcb_agent` | 智能 Agent — 给出高层任务，自主编排多步操作完成（需 ANTHROPIC_API_KEY） |
-
-### 计算工具 (2)
-
-| 工具 | 说明 |
-|------|------|
-| `calc_impedance` | 计算走线阻抗，或根据目标阻抗反算线宽（微带线/带状线/差分） |
-| `calc_trace_width` | 根据载流要求计算最小走线宽度 (IPC-2221) |
-
-> 所有坐标参数单位为 **mil**（密耳），与嘉立创 EDA bridge 一致。
-
-## 项目结构
-
-```
-├── src/                          # MCP Server 源码
-│   ├── index.ts                  # MCP 入口（stdio transport）
-│   ├── bridge-client.ts          # WebSocket 客户端，连接 gateway bridge
-│   ├── calculators.ts            # 阻抗/线宽纯计算函数
-│   ├── agent.ts                  # PCB Agent 核心（工具注册表 + tool-use 循环）
-│   └── tools/
-│       ├── state.ts              # 状态查询 (7)
-│       ├── components.ts         # 元件操作 (3)
-│       ├── routing.ts            # 走线/过孔 (4)
-│       ├── copper-keepout.ts     # 铺铜/禁布区 (4)
-│       ├── silkscreen.ts         # 丝印 (3)
-│       ├── advanced.ts           # 差分对/等长组 (4)
-│       ├── schematic.ts          # 原理图 (3)
-│       ├── calculators.ts        # 阻抗/线宽计算工具 (2)
-│       └── agent.ts              # PCB Agent 工具注册 (1)
-├── jlc-bridge/                   # 嘉立创 EDA 扩展插件
-│   ├── src/index.ts              # 插件主入口（2700+ 行）
-│   ├── extension.json            # 插件清单
-│   ├── build/pack.js             # 打包脚本（生成 .eext/.lcex）
-│   ├── package.json
-│   └── tsconfig.json
-├── dist/                         # MCP Server 编译输出
-├── package.json
-└── tsconfig.json
-```
-
-## 核心模块
-
-### bridge-client.ts
-
-WebSocket 客户端，连接 gateway `/ws/bridge`。
-
-- 协议：发送 `{type:'command', id, timestamp, payload:{action, params}}`，接收 `{type:'result', payload:{commandId, success, data, error}}`
-- 命令超时 60 秒
-- 断线自动重连（3 秒间隔）
-- 懒连接：首次调用 `command()` 时才建立 WebSocket
-
-### agent.ts
-
-PCB 智能 Agent 核心，基于 Anthropic Claude API 的 tool-use 循环。
-
-- 工具注册表：将 28 个 bridge 动作映射为 Anthropic tool-use 格式
-- Agent 循环：system prompt → messages.create → 执行 tool_use → 追加 tool_result → 继续循环
-- 最大轮次限制（默认 20），防止无限循环
-- 收集每步执行日志，最终一起返回
-- 零额外基础设施，纯 `@anthropic-ai/sdk` 实现
-
-### jlc-bridge 插件
-
-运行在嘉立创 EDA 内部的扩展插件，负责执行实际的 PCB/原理图操作。
-
-- 通过 WebSocket 连接 gateway，接收并执行命令
-- 支持文件轮询回退（当 WebSocket 不可用时）
-- 50+ 个底层操作函数（元件移动、走线、铺铜、DRC 等）
-- 打包为 `.eext` / `.lcex` 格式，在嘉立创 EDA 扩展管理器中安装
-
-构建插件：
+命令行侧：
 
 ```bash
-cd jlc-bridge
-npm install
-npm run build    # 编译 + 打包为 .eext
+npm run live                # 对着真开着的 EDA 跑一遍完整链路自检
+npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省事）
 ```
 
-## 使用示例
+### 常见情况
 
-在 AI IDE 中直接用自然语言：
+| 现象 | 原因 |
+|---|---|
+| 菜单显示「未连接」 | Claude Code 没开。桥接服务就跑在它的 MCP 进程里 |
+| 菜单显示「缺少外部交互权限」 | 扩展管理器 → 配置 → 勾「允许外部交互」 |
+| 端口被占 | 菜单「连接端口…」改一个，同时给 Claude Code 设 `JLC_BRIDGE_PORT` |
+| 工具报「嘉立创EDA 没有接进来」 | EDA 没开、没装扩展，或菜单第一行不是「已连接」 |
+| 扩展管理器里点「导入 / 卸载」毫无反应 | EDA 这个会话的扩展管理子系统卡住了（导入旧包也一样没反应、工程自动备份也在报失败）。重启 嘉立创EDA 即可 |
 
-```
-> 获取当前 PCB 状态
-  → 调用 pcb_get_state
+---
 
-> 把 U1 移到 (1000, 2000)
-  → 调用 pcb_move_component {designator:"U1", x:1000, y:2000}
-
-> 运行 DRC 检查
-  → 调用 pcb_run_drc
-
-> 在 GND 网络顶层铺铜，范围 (0,0) 到 (2000,4000)
-  → 调用 pcb_create_copper_pour {net:"GND", layer:1, x1:0, y1:0, x2:2000, y2:4000}
-
-> 创建 USB 差分对
-  → 调用 pcb_create_diff_pair {name:"USB", posNet:"USB_DP", negNet:"USB_DN"}
-
-> 分析当前布局并给出优化建议
-  → 调用 pcb_agent {task:"分析当前布局并给出优化建议"}
-  → Agent 自主调用 get_state → 分析 → 给出建议
-```
-
-## 验证
+## 开发
 
 ```bash
-# 编译
-npm run build
-
-# 测试 MCP 协议（不需要 gateway）
-echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":0}
-{"jsonrpc":"2.0","method":"tools/list","id":1}' | node dist/index.js
-
-# 端到端测试（需要 gateway + jlc-bridge 运行）
-# 在 AI IDE 中说 "获取当前 PCB 状态" 即可验证
+npm run build         # 编 mcp-server（TypeScript → dist/）
+npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
+npm run build:all     # 两个一起
+npm test              # 19 项自动化测试
+npm run check         # build + test
+npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
 
-## 技术栈
+测试分两层：
 
-- TypeScript 5.7, ES2022 modules
-- [@modelcontextprotocol/sdk](https://www.npmjs.com/package/@modelcontextprotocol/sdk) ^1.12 — MCP 协议实现
-- [@anthropic-ai/sdk](https://www.npmjs.com/package/@anthropic-ai/sdk) ^0.39 — Claude API（Agent tool-use 循环）
-- [ws](https://www.npmjs.com/package/ws) ^8 — WebSocket 客户端
-- [zod](https://www.npmjs.com/package/zod) ^3.23 — 工具参数 schema 定义
+- **`tests/extension.test.mjs`** —— 把**真实打包产物**装进一个复刻的 EDA 沙箱里跑
+  （`tests/eda-sandbox.mjs` 照着 EDA 安装目录里 `api.js` 的 `Tg` / `xg` / `Ta` 逐段抄的，
+  包括「每次调用都重新求值整个 bundle」这条最要命的行为）。
+  用户报过的每个症状都在这里有一条断言钉着。
+- **`tests/broker.test.mjs`** —— 真端口、真 WebSocket，只有 EDA 那头是假的。
+  覆盖转发、竞选、断线、网页来源拦截。
 
-## License
+改了协议要**同时**改 `src/protocol.ts` 和 `jlc-bridge/src/protocol.ts`（两份逐字对齐）。
 
-MIT
+架构细节、EDA 沙箱的坑、不许破坏的不变量 → 见 [CLAUDE.md](CLAUDE.md)。
+
+---
+
+## 更新记录
+
+### v0.2.0 —— 2026-08-04
+
+整个重构了一遍。用户报的三个问题各有各的根因：
+
+**① 「点状态要等很久」**
+`showStatus` 里会顺手跑一遍建链，卡在 5 秒的 WebSocket 超时上。
+现在状态只读内存里的缓存，秒开；而且状态直接写在菜单标题上，多数时候不用点开。
+
+**② 「连不上 WebSocket」**
+根因不在扩展 —— 旧架构是三段，中间那个 gateway 是要**手动双击 .bat** 才启动的。
+排查时 18800 端口上一个监听都没有。现在 broker 内嵌进 mcp-server，起 Claude Code 就有；
+多个 Claude Code 会话会自动竞选，谁先起来谁当 broker。
+（顺带确认了：扩展的「允许外部交互」权限一直是勾着的，不是权限问题。）
+
+**③ 「必须点两下 Enable/Disable 才能用」**
+这条最有意思：**EDA 每次调用扩展函数（包括每次点菜单）都会把整个 bundle 重新读出来、
+重新 eval 一遍**，模块级变量在两次点击之间根本不保留。旧代码是按「模块常驻」写的，
+于是内存里的开关恒为 false、存盘的开关是 true，第一下被判成「关闭」，第二下才真的打开。
+现在所有跨调用的状态挂在 `globalThis` 上，连接用幂等的 `ensureLink()`，
+装完即用，不需要点任何开关。
+
+顺带修掉的哑 bug（都是「不报错但结果是错的」那种）：
+
+- `pcb_auto_silkscreen` 调了一个从来没定义过的 `round3()` —— 一调用就 ReferenceError，
+  也就是说这个工具从来没成功跑过
+- `pcb_create_via` 发 `drill`、扩展只认 `holeDiameter` —— 钻孔尺寸被静默丢掉，
+  所有过孔都按默认 10 mil 建出来
+- `pcb_create_diff_pair` 发 `posNet/negNet`、扩展只认 `positiveNet/negativeNet` ——
+  每次都报「缺参数」
+- `pcb_get_pads` 的 `designator` 参数被静默忽略，查谁都返回全部焊盘
+- `pcb_screenshot` 读 `data.image`、扩展给的是 `data.imageDataUrl` —— 从来没返回过图片
+- `pcb_get_silkscreens` 从不传 `includeConflicts`，扩展里那套冲突检测等于永远关着
+- 文件轮询那条「备用传输」其实一直是死的：它用 `sys_File.mkdir` 建目录，
+  而这个 API 在 EDA 3.x 根本不存在，目录建不出来 ⇒ 所有读写静默失败。已删掉
+
+其它变化：
+
+- 菜单重做：状态灯 + 写清楚结果的动作项（「暂停桥接」而不是「Enable/Disable」），全中文
+- 扩展从 2765 行单文件拆成 12 个模块；120 行的 switch 换成动作表，
+  不认识的动作会把支持的动作列表一起报出来
+- broker 挡掉来自网页的连接（任意站点都能连本机 WebSocket，不挡就是个洞），
+  嘉立创EDA 自己的来源在白名单里
+- 命令结果只回给发起的那个客户端，不再广播
+- EDA 断线时在飞的命令立刻失败，不再干等 60 秒超时
+- 加了 19 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
+
+### v0.1.x
+
+原作者 [hyl64](https://github.com/hyl64/jlcmcp) 的版本。
+
+---
+
+## 关于作者
+
+当前维护：Claude (Opus 5)。
+
+原始版本由 hyl64 以 Apache-2.0 发布；MCP 工具的划分、
+PCB 图元读写那套 `getState_*` 的兼容写法来自那一版，保留致谢。
+原仓库看起来已不再维护（缺失的 gateway 中枢一直没有补进去，
+`README` 里的链路第三段在仓库里根本不存在）。
+
+许可证 Apache-2.0，见 [LICENSE](LICENSE)。
