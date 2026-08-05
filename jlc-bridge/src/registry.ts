@@ -98,7 +98,7 @@ const HANDLERS: Record<string, Handler> = {
   auto_silkscreen: (p) => autoSilkscreen(p),
 
   // 原理图 / 文档
-  get_schematic_state: () => getSchematicState(),
+  get_schematic_state: (p) => getSchematicState(p as any),
   get_netlist: (p) => getNetlist(p as any),
   run_sch_drc: (p) => runSchDrc(p as any),
   open_document: (p) => openDocument(p as any),

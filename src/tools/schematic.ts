@@ -2,8 +2,17 @@ import { z } from 'zod';
 import { BridgeLink } from '../link.js';
 
 export function registerSchematicTools(server: any, bridge: BridgeLink) {
-  server.tool('sch_get_state', '读取原理图状态', {}, async () => {
-    const data = await bridge.command('get_schematic_state');
+  server.tool('sch_get_state', '读取原理图元件与网络（当前不是原理图页时会自动切过去）', {
+    designators: z.array(z.string()).optional().describe('只看这些位号，如 ["U1","R3"]（可选）'),
+    includeProperties: z.boolean().optional().describe('是否带上元件的自定义属性，默认带'),
+    limit: z.number().optional().describe('最多返回多少个元件'),
+  }, async ({ designators, includeProperties, limit }: { designators?: string[]; includeProperties?: boolean; limit?: number }) => {
+    // 整板原理图元件很多（实测 164 个），不加过滤时返回体能到几万字符。
+    const params: Record<string, unknown> = {};
+    if (designators !== undefined) params.designators = designators;
+    if (includeProperties !== undefined) params.includeProperties = includeProperties;
+    if (limit !== undefined) params.limit = limit;
+    const data = await bridge.command('get_schematic_state', params);
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
   });
 

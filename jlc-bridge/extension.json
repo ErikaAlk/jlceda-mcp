@@ -18,8 +18,13 @@
   ],
   "activationEvents": {
     "onStartupFinished": "activate",
+    "onProjectOpened": "activate",
     "onEditorPcb": "activate",
     "onEditorSchematic": "activate",
+    "onEditorSymbol": "activate",
+    "onEditorFootprint": "activate",
+    "onEditorPanel": "activate",
+    "onLogged": "activate",
     "onChangeAllowExternalInteractions": "on"
   },
   "entry": "index.js",
