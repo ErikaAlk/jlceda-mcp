@@ -16,10 +16,16 @@ export function registerSchematicTools(server: any, bridge: BridgeLink) {
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
   });
 
-  server.tool('sch_get_netlist', '导出网表', {
-    type: z.string().optional().describe('网表格式'),
-  }, async ({ type }: { type?: string }) => {
+  server.tool('sch_get_netlist', '查网表连接关系（默认只给概览，可按网络或位号点查）', {
+    nets: z.array(z.string()).optional().describe('只看这些网络挂了哪些引脚'),
+    designators: z.array(z.string()).optional().describe('只看这些元件的引脚接到哪些网络'),
+    raw: z.boolean().optional().describe('返回整份网表原文。慎用：真实板子上是 35 万字符'),
+    type: z.string().optional().describe('网表格式，默认 JLCEDA'),
+  }, async ({ nets, designators, raw, type }: { nets?: string[]; designators?: string[]; raw?: boolean; type?: string }) => {
     const params: Record<string, unknown> = {};
+    if (nets !== undefined) params.nets = nets;
+    if (designators !== undefined) params.designators = designators;
+    if (raw !== undefined) params.raw = raw;
     if (type) params.type = type;
     const data = await bridge.command('get_netlist', params);
     return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };

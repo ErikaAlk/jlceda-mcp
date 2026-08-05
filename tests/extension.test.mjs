@@ -625,10 +625,78 @@ test('网表走 getNetlistFile，不碰已废弃且会卡死的 getNetlist', { s
   const { runtime, state } = boot({ extraApi: m.api });
   await runtime.call('activate', 'onStartupFinished');
 
-  const reply = await runCommand(runtime, state, 'get_netlist', {}, 3000);
+  const reply = await runCommand(runtime, state, 'get_netlist', { raw: true }, 3000);
   assert.equal(reply.ok, true, reply.error);
   assert.match(reply.data.netlist, /netlist JLCEDA/);
   assert.equal(deprecatedCalled, false, '绝不能退回去调那个会卡死的废弃接口');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('网表默认只给概览，不把 35 万字符原文丢回来', { skip }, async () => {
+  // 真机上整份网表 356687 字符，直接返回会把调用方的上下文撑爆。
+  const m = schematicMock();
+  const netlistJson = JSON.stringify({
+    version: '2.0.0',
+    components: {
+      gge1: {
+        props: { Designator: 'U1' },
+        pinInfoMap: {
+          1: { number: '1', name: 'VBAT', net: '' },
+          2: { number: '2', name: 'PC13', net: 'PC13' },
+          3: { number: '3', name: 'VSS', net: 'GND' },
+        },
+      },
+      gge2: {
+        props: { Designator: 'C1' },
+        pinInfoMap: {
+          1: { number: '1', name: '', net: 'GND' },
+          2: { number: '2', name: '', net: '+5V' },
+        },
+      },
+    },
+  });
+  m.api.sch_ManufactureData = {
+    getNetlistFile: async () => ({ text: async () => netlistJson }),
+  };
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  // 默认：概览，不带原文
+  const overview = await runCommand(runtime, state, 'get_netlist', {}, 3000);
+  assert.equal(overview.data.format, 'json');
+  assert.equal(overview.data.componentCount, 2);
+  assert.equal(overview.data.netCount, 3);
+  assert.equal(overview.data.netlist, undefined, '默认不该带原文');
+  assert.deepEqual(overview.data.nets[0], { name: 'GND', pinCount: 2 }, '按引脚数从多到少');
+
+  // 点名要某个网络：把引脚清单摊开
+  const gnd = await runCommand(runtime, state, 'get_netlist', { nets: ['gnd'] }, 3000);
+  assert.equal(gnd.data.nets.length, 1);
+  assert.deepEqual(
+    gnd.data.nets[0].pins.map((p) => `${p.designator}.${p.pin}`).sort(),
+    ['C1.1', 'U1.3'],
+  );
+
+  // 点名要某个元件：给它每个引脚接到哪儿
+  const u1 = await runCommand(runtime, state, 'get_netlist', { designators: ['U1'] }, 3000);
+  assert.equal(u1.data.components.length, 1);
+  assert.equal(u1.data.components[0].pins.length, 3);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('includeProperties:false 时 value 仍然要有', { skip }, async () => {
+  // 值藏在 otherProperty 里（EDA 没有 getState_Value()），
+  // 不能因为「不要属性表」就把值也一起吞掉 —— 真机上就是这么全空的。
+  const m = schematicMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_schematic_state', {
+    includeProperties: false,
+  });
+  assert.equal(reply.data.components[0].value, '100K');
+  assert.equal(reply.data.components[0].properties, undefined, '属性表本身不该带回来');
+  assert.equal(reply.data.totalComponents, 1, '过滤前的总数也要报');
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 

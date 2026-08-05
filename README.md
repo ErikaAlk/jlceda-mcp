@@ -70,7 +70,7 @@ jlc-bridge/build/jlc-bridge.eext
 | 规则 | `pcb_create_diff_pair` `pcb_create_equal_length` + 各自的 list / delete |
 | 丝印 | `pcb_move_silkscreen` `pcb_auto_silkscreen`（自动避让焊盘 / 过孔 / 其它丝印） |
 | 检查 | `pcb_run_drc` `sch_run_drc` |
-| 原理图 | `sch_get_state` `sch_get_netlist` `pcb_open_document` |
+| 原理图 | `sch_get_state`（元件+网络，可按位号过滤）`sch_get_netlist`（连接关系，可按网络/位号点查）`pcb_open_document` |
 | 计算 | `calc_impedance`（含反算线宽）`calc_trace_width`（IPC-2221） |
 | 诊断 | `pcb_ping` `pcb_get_feature_support` `bridge_status` |
 
@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 40 项自动化测试
+npm test              # 42 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -192,6 +192,11 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   而且报出来的错还不知道是哪个动作
 - 网络名三条路依次兜底：`sch_Net`（这版 EDA 上实测为空）→ 网络标签/标识/端口（可跨图页）
   → 当前页导线；返回里带 `netSource` / `netScope`，别让人以为拿到的都是全工程的
+- `sch_get_netlist` 默认只给概览：整份网表在真实板子上是 **35 万字符**，原样返回等于没法用。
+  现在默认给「有哪些网络、各挂几个引脚」，要细节就传 `nets` / `designators` 点查，
+  `raw:true` 才给原文。网表里有完整的引脚→网络映射，这是拿连接关系最靠谱的一条路
+- `includeProperties:false` 时 `value` 也要有：值藏在 `otherProperty` 里，
+  不能因为「不要属性表」把值一起吞掉
 - 文件轮询那条「备用传输」其实一直是死的：它用 `sys_File.mkdir` 建目录，
   而这个 API 在 EDA 3.x 根本不存在，目录建不出来 ⇒ 所有读写静默失败。已删掉
 
@@ -204,7 +209,7 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   嘉立创EDA 自己的来源在白名单里
 - 命令结果只回给发起的那个客户端，不再广播
 - EDA 断线时在飞的命令立刻失败，不再干等 60 秒超时
-- 加了 40 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
+- 加了 42 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
 - 旧配置里的 `GATEWAY_WS_URL` 仍然认（只取里面的端口），换新版不用改 `~/.claude.json`
 - **先开 EDA、后开 Claude Code 也会自己连上**：`sys_WebSocket` 连不上时一个回调都不给，
   没有连接超时的话状态会永远停在「正在连接」、心跳再也不会重新 register ——
