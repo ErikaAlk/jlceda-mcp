@@ -36,8 +36,6 @@ function statusTitle(phase: LinkPhase, port: number): string {
       return '◌ 正在连接…';
     case 'blocked':
       return '⚠ 缺少「外部交互」权限 · 点这里看怎么开';
-    case 'paused':
-      return '⏸ 已暂停 · 点下面「恢复桥接」';
     case 'offline':
     case 'idle':
     default:
@@ -51,17 +49,27 @@ const SURFACES = ['home', 'blank', 'schematic', 'symbol', 'pcb', 'footprint', 'p
 function buildMenuItems(): Array<MenuItem | null> {
   const hub = getHub();
 
+  // ⚠ 状态行和动作项**必须从同一个变量推**。
+  // 栽过：状态行读 hub.phase、动作项读 hub.enabled，两者一旦不同步就出现
+  // 「状态行写着『已暂停』、下面却摆着『暂停桥接』」这种自相矛盾的菜单。
+  // 现在只认 paused 这一个量，物理上不可能打架。
+  const paused = !hub.enabled;
+
   // 三段，段与段之间用 null 画分隔线（EDA 的约定）：
   //   ① 状态灯　② 改变链路的动作　③ 排障
-  const actions: MenuItem[] = hub.enabled
-    ? [
+  const actions: MenuItem[] = paused
+    ? [{ id: 'pause', title: '恢复桥接', registerFn: 'togglePause' }]
+    : [
         { id: 'reconnect', title: '立即重连', registerFn: 'reconnectNow' },
         { id: 'pause', title: '暂停桥接', registerFn: 'togglePause' },
-      ]
-    : [{ id: 'pause', title: '恢复桥接', registerFn: 'togglePause' }];
+      ];
 
   return [
-    { id: 'status', title: statusTitle(hub.phase, hub.port), registerFn: 'showStatus' },
+    {
+      id: 'status',
+      title: paused ? '⏸ 已暂停 · 点下面「恢复桥接」' : statusTitle(hub.phase, hub.port),
+      registerFn: 'showStatus',
+    },
     null,
     ...actions,
     { id: 'port', title: `连接端口…（当前 ${hub.port}）`, registerFn: 'changePort' },

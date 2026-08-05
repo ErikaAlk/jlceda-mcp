@@ -37,8 +37,16 @@ export interface BridgeHub {
   /** 协议版本，用来发现「globalThis 上还挂着上一版扩展的 hub」 */
   readonly v: number;
   phase: LinkPhase;
-  /** 用户希望桥接开着吗。这是内存里的镜像，真值存在 sys_Storage 里 */
+  /**
+   * 用户希望桥接开着吗 —— **这就是唯一真源**，别再从 sys_Storage 反复读回来盖它。
+   *
+   * 栽过：`boot()` 里每次都 `hub.enabled = readEnabled()`，而 `saveEnabled()` 是
+   * 异步的、失败还被吞掉。于是点完「暂停」，下一次点任何菜单项都会把 enabled 读回 true，
+   * 而 phase 还停在 'paused' —— 状态行写着「已暂停」、动作项却是「暂停桥接」，自己跟自己打架。
+   */
   enabled: boolean;
+  /** sys_Storage 里的值只在 hub 刚建出来时读一次，读过就置位 */
+  enabledLoaded: boolean;
   port: number;
   /** 最近一次收到对端任何数据的时间戳，判活用 */
   lastRxAt: number;
@@ -80,6 +88,7 @@ function createHub(port: number): BridgeHub {
     v: PROTOCOL_VERSION,
     phase: 'idle',
     enabled: true,
+    enabledLoaded: false,
     port,
     lastRxAt: 0,
     lastTxAt: 0,

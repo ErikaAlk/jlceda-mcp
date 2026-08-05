@@ -108,6 +108,7 @@ if (typeof ${fnName} === 'function') {${fnName}(${argExpr});} else if (edaEsbuil
 export function createEdaMock(options = {}) {
   const state = {
     config: { ...(options.config || {}) },
+    configWritesFail: Boolean(options.configWritesFail),
     menus: null,
     menuReplaceCount: 0,
     dialogs: [],
@@ -141,6 +142,10 @@ export function createEdaMock(options = {}) {
     sys_Storage: {
       getExtensionUserConfig: (key) => state.config[key],
       setExtensionUserConfig: async (key, value) => {
+        // configWritesFail: true 模拟「存盘悄悄失败」——EDA 的写是异步的，
+        // 扩展这边 .catch 掉之后完全看不出来。这种情况下扩展不能因为读回旧值
+        // 就把用户刚点下的选择冲掉。
+        if (state.configWritesFail) return false;
         state.config[key] = value;
         return true;
       },

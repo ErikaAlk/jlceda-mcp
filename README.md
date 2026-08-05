@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 27 项自动化测试
+npm test              # 30 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -183,7 +183,7 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   嘉立创EDA 自己的来源在白名单里
 - 命令结果只回给发起的那个客户端，不再广播
 - EDA 断线时在飞的命令立刻失败，不再干等 60 秒超时
-- 加了 27 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
+- 加了 30 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
 - 旧配置里的 `GATEWAY_WS_URL` 仍然认（只取里面的端口），换新版不用改 `~/.claude.json`
 - **先开 EDA、后开 Claude Code 也会自己连上**：`sys_WebSocket` 连不上时一个回调都不给，
   没有连接超时的话状态会永远停在「正在连接」、心跳再也不会重新 register ——
@@ -191,6 +191,10 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   broker 收到 hello 也会立刻回一帧，不用等它下一次心跳
 - 对端消失（Claude Code 退出）时改由扩展主动 ping 探活，2 秒左右就发现，
   不再干等 11 秒的接收超时
+- 菜单不再自相矛盾：状态行和「暂停/恢复」那一项以前分别读 `phase` 和 `enabled`，
+  两者一旦不同步就出现「状态行写着已暂停、下面却摆着『暂停桥接』」。现在同源推导。
+  根因是 `boot()` 每次都用存盘值覆盖内存里的开关，而 `sys_Storage` 的写是异步的、
+  失败还被吞掉 —— 存盘一失败，用户刚点下的暂停就被读回来的旧值冲掉了
 
 ### v0.1.x
 
