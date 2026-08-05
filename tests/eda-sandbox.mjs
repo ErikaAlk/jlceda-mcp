@@ -122,6 +122,14 @@ export function createEdaMock(options = {}) {
       onConnected: null,
       /** register 时是否立刻回调 onConnected（EDA 在复用已有连接时就是这样） */
       autoConnect: options.autoConnect !== false,
+      /**
+       * 对端在不在。false 时 register **不抛异常也不回调** —— 这正是
+       * 「Claude Code 还没开」时 sys_WebSocket 的真实行为：WebSocket 构造照样成功，
+       * 失败是异步的而且一个回调都不给。测「先开 EDA、后开 Claude Code」要靠它。
+       */
+      serverUp: options.serverUp !== false,
+      /** 收到 hello 是否自动回一帧（模拟 broker 的行为）。默认开 */
+      autoRespondHello: options.autoRespondHello !== false,
       closed: 0,
     },
   };
@@ -181,11 +189,27 @@ export function createEdaMock(options = {}) {
         state.ws.registered.push({ id, url });
         state.ws.onMessage = onMessage;
         state.ws.onConnected = onConnected;
+        // 对端不在：静默失败，什么回调都不给
+        if (!state.ws.serverUp) return;
         if (state.ws.autoConnect) onConnected?.();
       },
       send: (id, data) => {
         if (state.ws.denyPermission) throw permissionError();
+        if (!state.ws.serverUp) throw new Error('错误：WebSocket 数据发送失败！');
         state.ws.sent.push(data);
+        // 照 broker 的约定：收到 hello 立刻回一帧，让扩展能马上判定「真的通了」。
+        // 不模拟这一下的话，测试里的扩展会一直停在 connecting，和线上行为对不上。
+        if (state.ws.autoRespondHello) {
+          try {
+            if (JSON.parse(data)?.t === 'hello') {
+              state.ws.onMessage?.({
+                data: JSON.stringify({ v: 2, t: 'ping', ts: Date.now() }),
+              });
+            }
+          } catch {
+            /* 不是 JSON 就算了 */
+          }
+        }
       },
       close: () => {
         state.ws.closed += 1;
@@ -198,5 +222,17 @@ export function createEdaMock(options = {}) {
     ...(options.extraApi || {}),
   };
 
-  return { eda, state };
+  /**
+   * 收摊。**每个用例跑完必须调**：扩展的心跳是个真的 setInterval，不清掉的话
+   * 上一个用例的心跳会继续跑，而它 getHub() 拿到的是同一个 globalThis 上的 hub，
+   * 于是去改下一个用例的状态 —— 表现是用例单跑过、一起跑就诡异地挂。
+   */
+  const dispose = () => {
+    for (const { handle } of state.intervals.values()) clearInterval(handle);
+    state.intervals.clear();
+    state.ws.onMessage = null;
+    state.ws.onConnected = null;
+  };
+
+  return { eda, state, dispose };
 }

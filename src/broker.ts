@@ -188,6 +188,10 @@ export function startBroker(options: BrokerOptions): Promise<BrokerHandle> {
                 since: Date.now(),
               };
               log(`✓ 嘉立创EDA 扩展接入：${peer.info.name} v${peer.info.version}`);
+              // 立刻回一帧。扩展那边判「真的连上了」的依据是**收到过对端数据**
+              // （sys_WebSocket 不给 open/close 回调，只能这么判），不马上回的话
+              // 它要等到下一次心跳 ping 才翻成「已连接」，白白慢 3 秒。
+              send(peer, { v: PROTOCOL_VERSION, t: 'ping', ts: Date.now() });
               if (msg.v !== PROTOCOL_VERSION) {
                 log(
                   `⚠ 扩展的协议版本是 v${msg.v}，broker 是 v${PROTOCOL_VERSION}。` +
