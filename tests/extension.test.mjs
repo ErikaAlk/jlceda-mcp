@@ -422,11 +422,16 @@ function schematicMock(options = {}) {
     { getState_PrimitiveId: () => 'e12', getState_Designator: () => undefined },
   ];
 
+  // 当前打开的文档。openDocument 会真的改它 —— 扩展切完页之后要轮询等加载完，
+  // mock 不跟着变的话会一直等下去。
+  const current = { documentType: options.docType ?? 1, uuid: 'page1' };
+
   return {
     calls,
+    current,
     api: {
       dmt_SelectControl: {
-        getCurrentDocumentInfo: async () => ({ documentType: options.docType ?? 1 }),
+        getCurrentDocumentInfo: async () => ({ ...current }),
       },
       dmt_Board: {
         getCurrentBoardInfo: async () => ({
@@ -436,6 +441,8 @@ function schematicMock(options = {}) {
       dmt_EditorControl: {
         openDocument: async (uuid) => {
           calls.opened.push(uuid);
+          current.documentType = 1;
+          current.uuid = uuid;
         },
       },
       sch_PrimitiveComponent: {
@@ -531,6 +538,113 @@ test('原理图 DRC 也会先切过去', { skip }, async () => {
   assert.equal(reply.ok, true, reply.error);
   assert.equal(reply.data.passed, true);
   assert.deepEqual(m.calls.opened, ['page1']);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('切页之后要等文档加载完再读，不能定长 sleep', { skip }, async () => {
+  // 真机上栽过：切完页只等 600ms 就读，getAll 只返回 49 个元件；
+  // 等加载完再读是 164 个。少掉的那些不报错，就是静悄悄地没有。
+  const m = schematicMock({ docType: 3 });
+  let ready = false;
+  const full = [
+    {
+      getState_PrimitiveId: () => 'e1',
+      getState_Designator: () => 'U1',
+      getState_OtherProperty: () => ({}),
+    },
+    {
+      getState_PrimitiveId: () => 'e2',
+      getState_Designator: () => 'U2',
+      getState_OtherProperty: () => ({}),
+    },
+    {
+      getState_PrimitiveId: () => 'e3',
+      getState_Designator: () => 'U3',
+      getState_OtherProperty: () => ({}),
+    },
+  ];
+  // 刚切过去时只能读到一部分，过一会儿才全
+  m.api.sch_PrimitiveComponent.getAll = async (type, allPages) => {
+    m.calls.getAll.push({ type, allPages });
+    return ready ? full : full.slice(0, 1);
+  };
+  setTimeout(() => {
+    ready = true;
+  }, 400);
+
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_schematic_state', {}, 5000);
+  assert.equal(reply.ok, true, reply.error);
+  assert.equal(reply.data.componentCount, 3, '应该等到加载完再读，而不是拿半截数据');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('sch_Net 为空时，网络从网络标签/导线兜底取', { skip }, async () => {
+  // EDA 3.2.166 上 sch_Net.getAllNets() 实测返回空数组（接口标着 @alpha）。
+  const m = schematicMock();
+  m.api.sch_Net = { getAllNets: async () => [] }; // 官方接口给不出东西
+  const netSymbols = {
+    netlabel: [{ getState_Net: () => 'VMCU-3.3V' }, { getState_Net: () => 'GND' }],
+    netflag: [{ getState_Net: () => 'GND' }],
+    netport: [],
+  };
+  const origGetAll = m.api.sch_PrimitiveComponent.getAll;
+  m.api.sch_PrimitiveComponent.getAll = async (type, allPages) => {
+    if (netSymbols[type]) return netSymbols[type];
+    return origGetAll(type, allPages);
+  };
+
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_schematic_state');
+  assert.equal(reply.data.netSource, 'netLabels');
+  assert.equal(reply.data.netScope, 'allPages', '网络标识类图元能跨图页拿');
+  assert.deepEqual(
+    reply.data.nets.map((n) => n.name).sort(),
+    ['GND', 'VMCU-3.3V'],
+  );
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('网表走 getNetlistFile，不碰已废弃且会卡死的 getNetlist', { skip }, async () => {
+  const m = schematicMock();
+  let deprecatedCalled = false;
+  m.api.sch_Netlist = {
+    getNetlist: async () => {
+      deprecatedCalled = true;
+      return new Promise(() => {}); // 真机行为：永远不返回
+    },
+  };
+  m.api.sch_ManufactureData = {
+    getNetlistFile: async (name, type) => ({ text: async () => `(netlist ${type})` }),
+  };
+
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_netlist', {}, 3000);
+  assert.equal(reply.ok, true, reply.error);
+  assert.match(reply.data.netlist, /netlist JLCEDA/);
+  assert.equal(deprecatedCalled, false, '绝不能退回去调那个会卡死的废弃接口');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('EDA 的接口卡死时，扩展自己超时并说清是哪个动作', { skip }, async () => {
+  // 不加这道闸的话，一条卡死的命令会把整条链路占满 60 秒，别的命令也发不动。
+  const { runtime, state } = boot({
+    extraApi: { pcb_PrimitiveComponent: { getAll: () => new Promise(() => {}) } },
+  });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const hub = getHubState();
+  assert.ok(hub, 'hub 应该在');
+  // 45 秒的真超时不适合放进单测，这里只钉住「有这道闸、且报的是动作名」
+  const src = (await import('node:fs')).readFileSync(BUNDLE, 'utf8');
+  assert.match(src, /45e3|45_?000/, '注册表里应该有命令级超时（esbuild 会把 45_000 压成 45e3）');
+  assert.match(src, /\\u8FD8\\u6CA1\\u8FD4\\u56DE|还没返回/, '超时消息要点名是哪个动作');
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
