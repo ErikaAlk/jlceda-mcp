@@ -184,6 +184,7 @@ export async function getSchematicState(params?: {
 
   const components: any[] = [];
   let skippedWithoutDesignator = 0;
+  let totalWithDesignator = 0;
 
   for (const row of Array.isArray(rows) ? rows : []) {
     const primitiveId = readFirstStringValue(row, ['getState_PrimitiveId']);
@@ -194,9 +195,13 @@ export async function getSchematicState(params?: {
       skippedWithoutDesignator += 1;
       continue;
     }
+    totalWithDesignator += 1;
     if (wanted.size > 0 && !wanted.has(designator.toUpperCase())) continue;
 
-    const props = includeProperties ? readOtherProperty(row) : {};
+    // 属性表**永远要读**：值就藏在里面（EDA 没有 getState_Value()）。
+    // includeProperties 只决定要不要把整张表带回去，不能连值一起吞掉——
+    // 真机上传 includeProperties:false 时 value 全空，就是这么来的。
+    const props = readOtherProperty(row);
     const item: any = {
       primitiveId,
       designator,
@@ -231,6 +236,8 @@ export async function getSchematicState(params?: {
 
   return {
     componentCount: components.length,
+    /** 过滤/截断之前，这张原理图上一共有多少个真元件。少了它没法判断返回的是不是全部 */
+    totalComponents: totalWithDesignator,
     netCount: nets.length,
     components,
     nets,
@@ -331,30 +338,127 @@ async function collectNets(): Promise<{ nets: any[]; netSource: string; netScope
  * 真机上调它会**永远不返回**（等满 60 秒被上层超时掐掉，而且期间整条链路被占着）。
  * 官方指定的替代是 `sch_ManufactureData.getNetlistFile()`，返回一个 File。
  */
-export async function getNetlist(params: { type?: string }): Promise<any> {
+export async function getNetlist(params?: {
+  type?: string;
+  /** 原样返回整份网表文本。**慎用**：真实板子上是 35 万字符，够把调用方的上下文撑爆 */
+  raw?: boolean;
+  /** 只看这些网络上挂了哪些引脚 */
+  nets?: string[];
+  /** 只看这些元件的引脚接到哪些网络 */
+  designators?: string[];
+  limit?: number;
+}): Promise<any> {
   const api = edaApi();
   const { switched } = await ensureSchematicActive();
   const type = params?.type || 'JLCEDA';
 
-  if (api?.sch_ManufactureData?.getNetlistFile) {
-    const file = await api.sch_ManufactureData.getNetlistFile('netlist', type);
-    if (file && typeof file.text === 'function') {
-      const text = await file.text();
-      return {
-        netlist: text,
-        type,
-        bytes: text.length,
-        source: 'sch_ManufactureData.getNetlistFile',
-        switchedToSchematic: switched || undefined,
-      };
-    }
-    throw new Error(`导出网表失败：getNetlistFile 没有返回文件（type=${type}）`);
+  if (!api?.sch_ManufactureData?.getNetlistFile) {
+    throw new Error(
+      '这版 嘉立创EDA 没有 sch_ManufactureData.getNetlistFile。' +
+        '老的 sch_Netlist.getNetlist 已被官方废弃且实测会卡死，所以不再退回去用它。',
+    );
   }
 
-  throw new Error(
-    '这版 嘉立创EDA 没有 sch_ManufactureData.getNetlistFile。' +
-      '老的 sch_Netlist.getNetlist 已被官方废弃且实测会卡死，所以不再退回去用它。',
+  const file = await api.sch_ManufactureData.getNetlistFile('netlist', type);
+  if (!file || typeof file.text !== 'function') {
+    throw new Error(`导出网表失败：getNetlistFile 没有返回文件（type=${type}）`);
+  }
+  const text = await file.text();
+
+  const base = {
+    type,
+    bytes: text.length,
+    source: 'sch_ManufactureData.getNetlistFile',
+    switchedToSchematic: switched || undefined,
+  };
+
+  // 只有 JLCEDA / EasyEDA 格式是 JSON，能拆开查；别的格式（Protel2、PADS…）原样给
+  const parsed = parseJlcNetlist(text);
+  if (!parsed) return { ...base, format: 'text', netlist: text };
+
+  const summary = summarizeNetlist(parsed, params);
+  return { ...base, format: 'json', ...summary, netlist: params?.raw ? text : undefined };
+}
+
+function parseJlcNetlist(text: string): any | undefined {
+  const head = text.slice(0, 200).trimStart();
+  if (!head.startsWith('{')) return undefined;
+  try {
+    const json = JSON.parse(text);
+    return json && typeof json.components === 'object' ? json : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 把网表拆成能用的形状。
+ *
+ * 真实板子的网表是 35 万字符 —— 整份丢给调用方等于没法用（实测直接把上下文撑爆）。
+ * 所以默认只给「有哪些网络、各挂了几个引脚」，要细节再按网络名或位号点查。
+ */
+function summarizeNetlist(
+  netlist: any,
+  params?: { nets?: string[]; designators?: string[]; limit?: number },
+): any {
+  const comps: Record<string, any> = netlist.components || {};
+  const wantNets = new Set(
+    (params?.nets || []).map((n) => String(n || '').trim().toUpperCase()).filter(Boolean),
   );
+  const wantDes = new Set(
+    (params?.designators || []).map((d) => String(d || '').trim().toUpperCase()).filter(Boolean),
+  );
+  const limit = Math.max(1, Math.floor(toFiniteNumber(params?.limit, 3000)));
+
+  const netPins = new Map<string, Array<{ designator: string; pin: string; pinName: string }>>();
+  const perComponent: any[] = [];
+
+  for (const entry of Object.values(comps)) {
+    const designator = String(entry?.props?.Designator || '').trim();
+    const pinMap: Record<string, any> = entry?.pinInfoMap || {};
+    const pins: Array<{ pin: string; pinName: string; net: string }> = [];
+
+    for (const pin of Object.values(pinMap)) {
+      const net = String((pin as any)?.net || '').trim();
+      const number = String((pin as any)?.number ?? '').trim();
+      const pinName = String((pin as any)?.name ?? '').trim();
+      if (net) {
+        if (!netPins.has(net)) netPins.set(net, []);
+        netPins.get(net)!.push({ designator, pin: number, pinName });
+      }
+      pins.push({ pin: number, pinName, net });
+    }
+
+    if (wantDes.size > 0 && designator && wantDes.has(designator.toUpperCase())) {
+      perComponent.push({ designator, pins });
+    }
+  }
+
+  const allNets = Array.from(netPins.entries())
+    .map(([name, pins]) => ({ name, pinCount: pins.length, pins }))
+    .sort((a, b) => b.pinCount - a.pinCount);
+
+  const picked = wantNets.size > 0 ? allNets.filter((n) => wantNets.has(n.name.toUpperCase())) : allNets;
+
+  return {
+    componentCount: Object.keys(comps).length,
+    netCount: allNets.length,
+    // 没点名要哪个网络时只给概览（名字 + 引脚数），点了名才把引脚清单摊开
+    nets:
+      wantNets.size > 0
+        ? picked.slice(0, limit)
+        : picked.slice(0, limit).map(({ name, pinCount }) => ({ name, pinCount })),
+    components: wantDes.size > 0 ? perComponent : undefined,
+    hint:
+      wantNets.size > 0 || wantDes.size > 0
+        ? undefined
+        : '默认只给概览。要看某个网络挂了哪些引脚就传 nets，要看某个元件的引脚接到哪儿就传 designators；raw:true 才返回整份网表文本（很大）。',
+  };
+}
+
+function toFiniteNumber(value: any, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 export async function runSchDrc(params: { strict?: boolean }): Promise<any> {
