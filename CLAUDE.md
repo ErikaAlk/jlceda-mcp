@@ -53,6 +53,14 @@ Claude Code ⇄(stdio) mcp-server ⇄(ws://127.0.0.1:18800/ws/bridge) JLC MCP �
 
 - **判活只能靠「最近一次收到数据的时间」**（`hub.lastRxAt`）。broker 每 3 秒 ping 一次
   就是为了喂这个判据；扩展收到 ping 回 pong。超过 `RX_TIMEOUT_MS` 没动静就判死重连。
+- **连不上时同样一个回调都不给**：对端不在时 `new WebSocket(...)` 照样构造成功，
+  失败是异步的，`onConnected` 永远不来。所以 `connecting` **必须有超时**
+  （`CONNECT_TIMEOUT_MS`），超了就 `hardReset` 重来。
+  少了这条，phase 会永远停在 `connecting`、心跳再也不会重新 `register`——
+  表现就是用户报的「先开 EDA、后开 Claude Code，必须手动点一次重连」。
+  所有重连判断集中在 `advance()` 一处，别再散出去。
+- **连上之后扩展要主动 ping**（`KEEPALIVE_MS`）。往一个已关闭的 socket 上 `send` 会抛，
+  这是对端消失时唯一能快速察觉的信号；没有它就得干等 11 秒的接收超时。
 - `register()` 遇到同 ID 且 readyState 是 **CONNECTING 或 OPEN** 的连接时，会
   **立刻同步调用 `onConnected` 然后返回**——注意 CONNECTING 也算。
   所以「`onConnected` 被调了」≠「连上了」。phase 从 `connecting` 翻到 `online`
@@ -154,4 +162,4 @@ EDA 不给 console。三条路：
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（23 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（27 项）。每条断言都对应一个踩过的坑，别随手删。

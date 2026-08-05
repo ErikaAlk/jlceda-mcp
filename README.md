@@ -114,12 +114,12 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 23 项自动化测试
+npm test              # 27 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
 
-测试分两层：
+测试分四层，一层比一层接近真机：
 
 - **`tests/extension.test.mjs`** —— 把**真实打包产物**装进一个复刻的 EDA 沙箱里跑
   （`tests/eda-sandbox.mjs` 照着 EDA 安装目录里 `api.js` 的 `Tg` / `xg` / `Ta` 逐段抄的，
@@ -127,6 +127,9 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   用户报过的每个症状都在这里有一条断言钉着。
 - **`tests/broker.test.mjs`** —— 真端口、真 WebSocket，只有 EDA 那头是假的。
   覆盖转发、竞选、断线、网页来源拦截。
+- **`tests/reconnect-live.test.mjs`** —— 把上面两半接起来：**真实扩展产物 + 真 socket + 真 broker**，
+  按「先开 EDA、后开 Claude Code」的顺序跑通一条真命令。唯一缺的只有 EDA 本体。
+- **`tests/server.test.mjs`** —— 真起 `dist/index.js` 走 stdio，验证构建产物能被 Claude Code 加载。
 
 改了协议要**同时**改 `src/protocol.ts` 和 `jlc-bridge/src/protocol.ts`（两份逐字对齐）。
 
@@ -180,8 +183,14 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   嘉立创EDA 自己的来源在白名单里
 - 命令结果只回给发起的那个客户端，不再广播
 - EDA 断线时在飞的命令立刻失败，不再干等 60 秒超时
-- 加了 23 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
+- 加了 27 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
 - 旧配置里的 `GATEWAY_WS_URL` 仍然认（只取里面的端口），换新版不用改 `~/.claude.json`
+- **先开 EDA、后开 Claude Code 也会自己连上**：`sys_WebSocket` 连不上时一个回调都不给，
+  没有连接超时的话状态会永远停在「正在连接」、心跳再也不会重新 register ——
+  表现就是「必须手动点一次重连」。现在 1.8 秒没通就推倒重来，每 2 秒重试一次；
+  broker 收到 hello 也会立刻回一帧，不用等它下一次心跳
+- 对端消失（Claude Code 退出）时改由扩展主动 ping 探活，2 秒左右就发现，
+  不再干等 11 秒的接收超时
 
 ### v0.1.x
 

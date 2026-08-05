@@ -44,6 +44,17 @@ export interface BridgeHub {
   lastRxAt: number;
   lastTxAt: number;
   onlineSince: number;
+  /**
+   * 本次 connect 是什么时候发起的。
+   *
+   * `sys_WebSocket` 连不上时**什么回调都不给**（没有 error、没有 close，onConnected 也不会来），
+   * 所以「这次连接是不是已经废了」只能靠这个时间戳超时判定。
+   * 没有它的话 phase 会永远卡在 connecting，心跳再也不会重新 register —— 表现就是
+   * 「先开 EDA 后开 Claude Code，必须手动点一次重连」。
+   */
+  connectStartedAt: number;
+  /** 权限被拒后下一次可以重试的时间点。放 hub 里而不是模块变量，否则重新求值就丢 */
+  blockedRetryAt: number;
   /** 最近一次失败的人话原因，直接摆在菜单和状态窗口里 */
   lastError: string;
   /** 处理过多少条命令，看得出「到底有没有在干活」 */
@@ -73,6 +84,8 @@ function createHub(port: number): BridgeHub {
     lastRxAt: 0,
     lastTxAt: 0,
     onlineSince: 0,
+    connectStartedAt: 0,
+    blockedRetryAt: 0,
     lastError: '',
     commandCount: 0,
     lastAction: '',
