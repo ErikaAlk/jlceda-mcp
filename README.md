@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 31 项自动化测试
+npm test              # 36 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -174,6 +174,16 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 - `pcb_get_board_info` 找的是 `info.sch.uuid`，而 EDA 给的是 `info.schematic.uuid` ——
   `schematicUuid` 一直返回空串，`sch_*` 那几个工具和「切到原理图」都没法用
   （这条是接上真机之后第一次调用才发现的）
+- 原理图那一整块基本是废的（真机上量出来的）：
+  `sch_PrimitiveComponent.getAll()` 不传器件类型，会把网络标识/端口/标签也当成元件返回
+  —— 实测 311 条里只有 164 条有位号，所以看着像「元件字段全是空的」；
+  `value` 读的是不存在的 `getState_Value()`（真值在 `getState_OtherProperty()` 里）；
+  库引用读的是不存在的 `getState_LibraryUuid()`（真接口是 `getState_Component()`）；
+  网络读的是 `sch_PrimitivePin.getAll()`，那个拿的是**符号编辑器里的引脚**，
+  在原理图页上恒为 0 条 —— 网络得走 `sch_Net.getAllNets()`
+- **原理图的 API 只在「当前打开的是原理图页」时才工作**。在 PCB 页上调 `sch_run_drc`，
+  EDA 回一句 `doctype(3) not support`（3 = PCB），光看这句猜不到是标签页不对。
+  现在 `sch_*` 三个命令都会先自动切过去，并在返回值里说明切过（`switchedToSchematic`）
 - 文件轮询那条「备用传输」其实一直是死的：它用 `sys_File.mkdir` 建目录，
   而这个 API 在 EDA 3.x 根本不存在，目录建不出来 ⇒ 所有读写静默失败。已删掉
 
@@ -186,7 +196,7 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   嘉立创EDA 自己的来源在白名单里
 - 命令结果只回给发起的那个客户端，不再广播
 - EDA 断线时在飞的命令立刻失败，不再干等 60 秒超时
-- 加了 31 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
+- 加了 36 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
 - 旧配置里的 `GATEWAY_WS_URL` 仍然认（只取里面的端口），换新版不用改 `~/.claude.json`
 - **先开 EDA、后开 Claude Code 也会自己连上**：`sys_WebSocket` 连不上时一个回调都不给，
   没有连接超时的话状态会永远停在「正在连接」、心跳再也不会重新 register ——

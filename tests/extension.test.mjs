@@ -397,6 +397,156 @@ test('get_board_info 要认得 EDA 真实返回的字段名', { skip }, async ()
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
+// ─── 原理图 ───
+//
+// 下面这组的 fixture 全部照真机量到的形状造：真实原理图上 sch_PrimitiveComponent.getAll()
+// 不加类型参数会返回 311 条，其中只有 164 条是真元件，其余是网络标识/端口/标签这类没有位号的东西。
+
+function schematicMock(options = {}) {
+  const calls = { getAll: [], opened: [] };
+  const parts = [
+    {
+      getState_PrimitiveId: () => 'e10',
+      getState_Designator: () => 'R15',
+      getState_Name: () => '电阻',
+      getState_X: () => 100,
+      getState_Y: () => 200,
+      getState_Rotation: () => 0,
+      getState_OtherProperty: () => ({ Value: '100K', 封装: 'R0603' }),
+      getState_Component: () => ({ libraryUuid: 'lib1', uuid: 'dev1', name: '100K' }),
+      getState_Footprint: () => ({ libraryUuid: 'lib1', uuid: 'fp1', name: 'R0603' }),
+      getState_ManufacturerId: () => 'RC0603FR-07100KL',
+    },
+    // 没有位号的标识类图元：不加类型参数时 getAll 会把这些也返回
+    { getState_PrimitiveId: () => 'e11', getState_Designator: () => '' },
+    { getState_PrimitiveId: () => 'e12', getState_Designator: () => undefined },
+  ];
+
+  return {
+    calls,
+    api: {
+      dmt_SelectControl: {
+        getCurrentDocumentInfo: async () => ({ documentType: options.docType ?? 1 }),
+      },
+      dmt_Board: {
+        getCurrentBoardInfo: async () => ({
+          schematic: { uuid: 'sch1', page: [{ uuid: 'page1', name: 'p1' }] },
+        }),
+      },
+      dmt_EditorControl: {
+        openDocument: async (uuid) => {
+          calls.opened.push(uuid);
+        },
+      },
+      sch_PrimitiveComponent: {
+        getAll: async (type, allPages) => {
+          calls.getAll.push({ type, allPages });
+          return parts;
+        },
+      },
+      sch_Net: {
+        getAllNets: async () => [
+          { net: 'GND', wires: [{ pageName: 'p1' }, { pageName: 'p2' }] },
+          { net: '+5V', wires: [{ pageName: 'p1' }] },
+        ],
+      },
+      sch_Drc: { check: async () => [] },
+      // 原理图页上恒为空 —— 真机量到 0 条，原来就是读它才「读不出网络」
+      sch_PrimitivePin: { getAll: async () => [] },
+    },
+  };
+}
+
+async function runCommand(runtime, state, action, params = {}, waitMs = 80) {
+  state.ws.sent.length = 0;
+  state.ws.onMessage({ data: JSON.stringify({ v: 2, t: 'cmd', id: 'q', action, params }) });
+  // 切文档那条路里有 600ms 的加载等待，等太短会拿到 undefined
+  const deadline = Date.now() + waitMs;
+  let reply;
+  do {
+    await sleep(40);
+    reply = state.ws.sent.map((s) => JSON.parse(s)).find((m) => m.t === 'res');
+  } while (!reply && Date.now() < deadline);
+  return reply;
+}
+
+test('原理图元件：只取真元件，位号/值/库引用都读得出来', { skip }, async () => {
+  const m = schematicMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_schematic_state');
+  assert.equal(reply.ok, true, reply.error);
+
+  // 不传 'part' 的话会混进一堆没有位号的标识图元 —— 真机上 311 里只有 164 条是真元件
+  assert.deepEqual(m.calls.getAll[0], { type: 'part', allPages: true });
+
+  assert.equal(reply.data.componentCount, 1);
+  assert.equal(reply.data.skippedNonPartSymbols, 2);
+
+  const r15 = reply.data.components[0];
+  assert.equal(r15.designator, 'R15');
+  assert.equal(r15.value, '100K', 'EDA 没有 getState_Value()，值在 otherProperty 里');
+  assert.equal(r15.component.uuid, 'dev1', '库引用要从 getState_Component() 取');
+  assert.equal(r15.footprint.uuid, 'fp1');
+  assert.equal(r15.manufacturerId, 'RC0603FR-07100KL');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('原理图网络走 sch_Net，不走恒为空的引脚接口', { skip }, async () => {
+  const m = schematicMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_schematic_state');
+  assert.equal(reply.data.netCount, 2);
+  assert.deepEqual(
+    reply.data.nets.map((n) => n.name),
+    ['GND', '+5V'],
+  );
+  assert.deepEqual(reply.data.nets[0].pages, ['p1', 'p2']);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('当前是 PCB 页时自动切到原理图，而不是回一句 doctype(3)', { skip }, async () => {
+  // EDMT_EditorDocumentType.PCB = 3。原理图的 API 在 PCB 页上会被 EDA 直接挡回来，
+  // 错误写着 "doctype(3) not support"，光看这句完全猜不到是标签页不对。
+  const m = schematicMock({ docType: 3 });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_schematic_state', {}, 2000);
+  assert.equal(reply.ok, true, reply.error);
+  assert.deepEqual(m.calls.opened, ['page1'], '应该先切到原理图第一页');
+  assert.equal(reply.data.switchedToSchematic, true, '切了要说出来，不能偷偷切');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('原理图 DRC 也会先切过去', { skip }, async () => {
+  const m = schematicMock({ docType: 3 });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'run_sch_drc', {}, 2000);
+  assert.equal(reply.ok, true, reply.error);
+  assert.equal(reply.data.passed, true);
+  assert.deepEqual(m.calls.opened, ['page1']);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('按位号过滤原理图元件', { skip }, async () => {
+  const m = schematicMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const hit = await runCommand(runtime, state, 'get_schematic_state', { designators: ['r15'] });
+  assert.equal(hit.data.componentCount, 1, '位号过滤要忽略大小写');
+
+  const miss = await runCommand(runtime, state, 'get_schematic_state', { designators: ['U99'] });
+  assert.equal(miss.data.componentCount, 0);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
 test('自检读不到 PCB 时要说清楚是没打开 PCB', { skip }, async () => {
   const { runtime, state } = boot({
     extraApi: {
