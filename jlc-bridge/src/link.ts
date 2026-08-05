@@ -101,6 +101,18 @@ export function ensureLink(): void {
 function advance(hub: BridgeHub): void {
   const now = Date.now();
 
+  // ⓪ 先归一：'paused' 只是 hub.enabled 的投影，两者不许打架。
+  //    少了这一步的话，enabled 一旦被别处改回 true，phase 会永远卡在 'paused'
+  //    （switch 里没有它的分支，落到 default 直接返回）——
+  //    表现就是菜单状态行写「已暂停」、动作项却是「暂停桥接」，自相矛盾且点不动。
+  if (!hub.enabled) {
+    hub.phase = 'paused';
+    return;
+  }
+  if (hub.phase === 'paused') {
+    hub.phase = 'offline'; // 已经恢复了，让下面的分支去重连
+  }
+
   // ① 连着但太久没收到数据 ⇒ 判死
   if (hub.phase === 'online' && now - hub.lastRxAt > RX_TIMEOUT_MS) {
     hubLog(`${RX_TIMEOUT_MS}ms 没收到 broker 的心跳，判定断线`);
@@ -153,6 +165,10 @@ export function pause(): void {
   hub.enabled = false;
   hardReset(hub);
   hub.phase = 'paused';
+  // 心跳在这里就停掉，别拖到下一拍 tick 里 —— 状态迁移要一次做完，
+  // 中间那 2 秒里 hub 处在「已暂停但心跳还在跑」的中间态，很容易出怪事。
+  clearInterval_(HEARTBEAT_ID);
+  hub.heartbeatArmed = false;
   hubLog('用户暂停了桥接');
 }
 

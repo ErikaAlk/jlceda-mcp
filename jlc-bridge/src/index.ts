@@ -21,7 +21,12 @@ import { getPCBState } from './commands/pcb-state';
 function boot(): void {
   const hub = getHub(readPort());
   hub.port = readPort();
-  hub.enabled = readEnabled();
+  // 存盘值只在 hub 刚建出来（= EDA 本次会话第一次跑到扩展）时读一次。
+  // 每次都读的话会把用户刚点下的「暂停」冲掉 —— 见 hub.ts 里 enabled 字段的注释。
+  if (!hub.enabledLoaded) {
+    hub.enabled = readEnabled();
+    hub.enabledLoaded = true;
+  }
   setMenuRefresher(() => refreshMenu());
   ensureLink();
   refreshMenu(true);

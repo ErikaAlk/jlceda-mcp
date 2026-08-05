@@ -19,6 +19,9 @@ const skip = existsSync(BUNDLE)
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** 扩展跨调用的状态都挂在 globalThis 上（见 hub.ts） */
+const getHubState = () => globalThis.__JLC_BRIDGE_HUB_V2__;
+
 /** 每个用例创建的假 EDA，afterEach 里统一收摊（心跳是真的 setInterval，见 dispose 的注释） */
 const live = [];
 
@@ -69,6 +72,83 @@ test('暂停/恢复各只需要点一次', { skip }, async () => {
 
   await runtime.call('togglePause');
   assert.equal(state.config.bridgeEnabled, true, '再点一次就应该恢复');
+});
+
+/** 从当前菜单里取出状态行标题和「暂停/恢复」那一项的标题 */
+function menuTexts(state) {
+  const items = state.menus.pcb[0].menuItems.filter(Boolean);
+  return {
+    status: items[0].title,
+    toggle: items.find((i) => i.id === 'pause').title,
+  };
+}
+
+test('暂停之后，状态行和动作项不许自相矛盾', { skip }, async () => {
+  // 用户截图里的样子：状态行写「⏸ 已暂停」，下面的动作项却是「暂停桥接」。
+  // 根因是这两处读了两个不同的变量（phase / enabled），而 boot() 每次都用存盘值
+  // 覆盖 enabled，把刚点下的暂停冲掉了。
+  const { runtime, state } = boot();
+  await runtime.call('activate', 'onStartupFinished');
+
+  await runtime.call('togglePause');
+  let m = menuTexts(state);
+  assert.match(m.status, /已暂停/);
+  assert.match(m.toggle, /恢复桥接/, '暂停之后动作项必须是「恢复桥接」');
+
+  // 再点几个别的菜单项 —— 每一次都是一次完整的重新求值
+  await runtime.call('showStatus');
+  await runtime.call('runSelfTest');
+  await sleep(40);
+
+  m = menuTexts(state);
+  assert.match(m.status, /已暂停/, '点了别的菜单项之后还应该是暂停态');
+  assert.match(m.toggle, /恢复桥接/, '动作项不能变回「暂停桥接」');
+  assert.equal(getHubState().phase, 'paused');
+
+  // 就算状态不知怎么被弄拧了（phase 说暂停、enabled 说开着），
+  // 菜单也不能画出自相矛盾的两行——这是用户截图里那一幕。
+  getHubState().enabled = true;
+  await runtime.call('showStatus');
+  m = menuTexts(state);
+  const statusSaysPaused = /已暂停/.test(m.status);
+  const toggleSaysResume = /恢复桥接/.test(m.toggle);
+  assert.equal(
+    statusSaysPaused,
+    toggleSaysResume,
+    `状态行和动作项打架了：「${m.status}」配「${m.toggle}」`,
+  );
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('存盘失败时也不能把用户刚点下的暂停冲掉', { skip }, async () => {
+  // sys_Storage 的写是异步的、还可能悄悄失败。扩展这边一旦拿读回来的旧值
+  // 去盖内存里的选择，用户点的「暂停」就白点了。
+  const { runtime, state } = boot();
+  await runtime.call('activate', 'onStartupFinished');
+
+  state.configWritesFail = true; // 从现在起所有存盘都静默失败
+  await runtime.call('togglePause');
+  await runtime.call('showStatus'); // 又一次完整重新求值
+
+  const m = menuTexts(state);
+  assert.match(m.toggle, /恢复桥接/, '存盘失败也不该让暂停失效');
+  assert.equal(getHubState().enabled, false);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('恢复之后 phase 要真的离开 paused，而不是卡在那儿', { skip }, async () => {
+  const { runtime, state } = boot();
+  await runtime.call('activate', 'onStartupFinished');
+  await runtime.call('togglePause');
+  assert.equal(getHubState().phase, 'paused');
+
+  await runtime.call('togglePause'); // 恢复
+  const hub = getHubState();
+  assert.notEqual(hub.phase, 'paused', '恢复之后不能还停在 paused');
+  assert.equal(hub.enabled, true);
+  assert.ok(hub.heartbeatArmed, '恢复之后心跳要重新装上，否则再也不会自动重连');
+  assert.match(menuTexts(state).toggle, /暂停桥接/);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
 test('跨调用的状态活在 globalThis 上，不会被重新求值抹掉', { skip }, async () => {
