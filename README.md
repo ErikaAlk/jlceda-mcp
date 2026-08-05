@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 30 项自动化测试
+npm test              # 31 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -171,6 +171,9 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 - `pcb_get_pads` 的 `designator` 参数被静默忽略，查谁都返回全部焊盘
 - `pcb_screenshot` 读 `data.image`、扩展给的是 `data.imageDataUrl` —— 从来没返回过图片
 - `pcb_get_silkscreens` 从不传 `includeConflicts`，扩展里那套冲突检测等于永远关着
+- `pcb_get_board_info` 找的是 `info.sch.uuid`，而 EDA 给的是 `info.schematic.uuid` ——
+  `schematicUuid` 一直返回空串，`sch_*` 那几个工具和「切到原理图」都没法用
+  （这条是接上真机之后第一次调用才发现的）
 - 文件轮询那条「备用传输」其实一直是死的：它用 `sys_File.mkdir` 建目录，
   而这个 API 在 EDA 3.x 根本不存在，目录建不出来 ⇒ 所有读写静默失败。已删掉
 
@@ -183,7 +186,7 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
   嘉立创EDA 自己的来源在白名单里
 - 命令结果只回给发起的那个客户端，不再广播
 - EDA 断线时在飞的命令立刻失败，不再干等 60 秒超时
-- 加了 30 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
+- 加了 31 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
 - 旧配置里的 `GATEWAY_WS_URL` 仍然认（只取里面的端口），换新版不用改 `~/.claude.json`
 - **先开 EDA、后开 Claude Code 也会自己连上**：`sys_WebSocket` 连不上时一个回调都不给，
   没有连接超时的话状态会永远停在「正在连接」、心跳再也不会重新 register ——

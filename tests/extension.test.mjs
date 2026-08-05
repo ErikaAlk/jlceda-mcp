@@ -346,6 +346,57 @@ test('对端消失后靠主动 ping 尽快发现，而不是干等 11 秒', { sk
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
+test('get_board_info 要认得 EDA 真实返回的字段名', { skip }, async () => {
+  // fixture 是真机上 dmt_Board.getCurrentBoardInfo() 的实际返回，一字未改。
+  // 原来的代码找的是 info.sch.uuid，而 EDA 给的是 info.schematic.uuid ——
+  // schematicUuid 一直是空串，sch_* 和「切到原理图」全都没法用。
+  const realBoardInfo = {
+    name: 'Board1',
+    uuid: '525eb0a5c052ea4c',
+    zIndex: 1,
+    parentProjectUuid: '8b10bedd9d484f77b020434d405b4bb6',
+    pcb: {
+      itemType: 'PCB',
+      uuid: '107fb73b165b4a108c2b96469149f2e5',
+      name: 'PCB1',
+      parentProjectUuid: '8b10bedd9d484f77b020434d405b4bb6',
+      parentBoardName: 'Board1',
+    },
+    schematic: {
+      itemType: 'Schematic',
+      uuid: '379928e1f83c4e3e8a3e416e63fde89d',
+      name: 'schematic1',
+      parentProjectUuid: '8b10bedd9d484f77b020434d405b4bb6',
+      page: [
+        { itemType: 'Schematic Page', uuid: 'b28c873246764dd38100759bb9639a7e', name: 'p1' },
+        { itemType: 'Schematic Page', uuid: '19b4712d50cb48e5bf14ad0240a29bc1', name: 'p2' },
+      ],
+    },
+  };
+
+  const { runtime, state } = boot({
+    extraApi: { dmt_Board: { getCurrentBoardInfo: async () => realBoardInfo } },
+  });
+  await runtime.call('activate', 'onStartupFinished');
+  state.ws.sent.length = 0;
+
+  state.ws.onMessage({
+    data: JSON.stringify({ v: 2, t: 'cmd', id: 'b1', action: 'get_board_info', params: {} }),
+  });
+  await sleep(60);
+
+  const reply = state.ws.sent.map((s) => JSON.parse(s)).find((m) => m.t === 'res');
+  assert.equal(reply.ok, true);
+  assert.equal(reply.data.schematicUuid, '379928e1f83c4e3e8a3e416e63fde89d');
+  assert.equal(reply.data.pcbUuid, '107fb73b165b4a108c2b96469149f2e5');
+  assert.equal(reply.data.projectUuid, '8b10bedd9d484f77b020434d405b4bb6');
+  assert.deepEqual(
+    reply.data.schematicPages.map((p) => p.name),
+    ['p1', 'p2'],
+  );
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
 test('自检读不到 PCB 时要说清楚是没打开 PCB', { skip }, async () => {
   const { runtime, state } = boot({
     extraApi: {
