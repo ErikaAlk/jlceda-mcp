@@ -495,10 +495,24 @@ export async function getBoardInfo(): Promise<any> {
     throw new Error('这版 嘉立创EDA 不支持读取工程信息');
   }
   const info = await api.dmt_Board.getCurrentBoardInfo();
+
+  // EDA 实际给的是 info.schematic.uuid，不是 info.sch.uuid ——
+  // 真机上一调就发现 schematicUuid 是空串，而 sch_* 那几个工具和
+  // 「切到原理图」全靠它。又一个不报错但结果是错的字段名。
+  const pages = Array.isArray(info?.schematic?.page) ? info.schematic.page : [];
+
   return {
     name: String(info?.name || info?.title || ''),
-    schematicUuid: String(info?.schematicUuid || info?.schUuid || info?.sch?.uuid || ''),
+    schematicUuid: String(
+      info?.schematicUuid || info?.schUuid || info?.schematic?.uuid || info?.sch?.uuid || '',
+    ),
     pcbUuid: String(info?.pcbUuid || info?.pcb?.uuid || ''),
+    projectUuid: String(info?.parentProjectUuid || info?.projectUuid || ''),
+    /** 原理图分页。open_document 要的是**页的 uuid**，不是原理图本身的 */
+    schematicPages: pages.map((p: any) => ({
+      uuid: String(p?.uuid || ''),
+      name: String(p?.name || ''),
+    })),
     raw: info ?? null,
   };
 }
