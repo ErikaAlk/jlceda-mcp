@@ -62,8 +62,60 @@ async function ensureSchematicActive(): Promise<{ switched: boolean; pageUuid: s
   }
 
   await api.dmt_EditorControl.openDocument(pageUuid);
-  await delay(600); // 等文档真的加载完，紧接着就要读它
+  await waitUntilLoaded(pageUuid);
   return { switched: true, pageUuid };
+}
+
+/**
+ * 等切过去的原理图真的加载完。
+ *
+ * **不能用固定的 sleep。** 真机上栽过：切完页只 sleep 600ms 就去读，
+ * `getAll('part', true)` 只返回 49 个元件；等文档加载完再读是 164 个。
+ * 少掉的那些不会报错，就是静悄悄地没有 —— 这种「读到一半」比读不到危险得多。
+ *
+ * 判据分两层：先等目标页真的成为当前文档，再等元件数连续两次读一样（稳定了）。
+ */
+async function waitUntilLoaded(pageUuid: string): Promise<void> {
+  const api = edaApi();
+
+  // ① 等 tab 真的切过去
+  for (let i = 0; i < 40; i += 1) {
+    try {
+      const info = await api?.dmt_SelectControl?.getCurrentDocumentInfo?.();
+      const uuid = String(info?.uuid || '');
+      if (Number(info?.documentType) === DOCTYPE_SCHEMATIC_PAGE && (!pageUuid || uuid === pageUuid)) {
+        break;
+      }
+    } catch {
+      /* 继续等 */
+    }
+    await delay(100);
+  }
+
+  // ② 等元件数「不再变了」。
+  //
+  // 注意**不能只要两次读一样就收工** —— 加载中途的那份半截数据也可能连着两次一样，
+  // 于是把 49 个当成全部（真机上就是这么读岔的）。要求连着 STABLE_HITS 次都一样，
+  // 也就是至少 STABLE_HITS × POLL_MS 这么久没有变化，才认定加载完了。
+  const POLL_MS = 150;
+  const STABLE_HITS = 3;
+  await delay(300); // 刚发出切换指令时读到的一定不作数
+
+  let previous = -1;
+  let stable = 0;
+  for (let i = 0; i < 40; i += 1) {
+    let count = -1;
+    try {
+      const rows = await api?.sch_PrimitiveComponent?.getAll?.(COMPONENT_TYPE_PART, true);
+      count = Array.isArray(rows) ? rows.length : -1;
+    } catch {
+      /* 继续等 */
+    }
+    stable = count > 0 && count === previous ? stable + 1 : 0;
+    if (stable >= STABLE_HITS - 1) return;
+    previous = count;
+    await delay(POLL_MS);
+  }
 }
 
 /** 元件上的自定义属性（值/精度/耐压这些）都在 otherProperty 里，EDA 没有 getState_Value() */
@@ -175,43 +227,16 @@ export async function getSchematicState(params?: {
     if (components.length >= limit) break;
   }
 
-  // 网络走 sch_Net。原来读 sch_PrimitivePin.getAll()，那个拿的是**符号编辑器里的引脚**，
-  // 在原理图页上恒为空 —— 真机上量到 0 条，所以「读不出网络」。
-  const nets: any[] = [];
-  if (api?.sch_Net?.getAllNets) {
-    try {
-      const netRows = await api.sch_Net.getAllNets();
-      for (const n of Array.isArray(netRows) ? netRows : []) {
-        const name = String(n?.net || '').trim();
-        if (!name) continue;
-        const wires = Array.isArray(n?.wires) ? n.wires : [];
-        nets.push({
-          name,
-          wireCount: wires.length,
-          pages: Array.from(new Set(wires.map((w: any) => String(w?.pageName || '')).filter(Boolean))),
-        });
-      }
-    } catch {
-      /* 下面还有兜底 */
-    }
-  }
-  if (nets.length === 0 && api?.sch_Net?.getAllNetsName) {
-    try {
-      const names = await api.sch_Net.getAllNetsName();
-      for (const name of Array.isArray(names) ? names : []) {
-        const text = String(name || '').trim();
-        if (text) nets.push({ name: text });
-      }
-    } catch {
-      /* ignore */
-    }
-  }
+  const { nets, netSource, netScope } = await collectNets();
 
   return {
     componentCount: components.length,
     netCount: nets.length,
     components,
     nets,
+    /** 网络是从哪儿来的、覆盖范围多大 —— 不同来源覆盖面不一样，别让调用方以为都是全工程的 */
+    netSource,
+    netScope,
     /** getAll 里那些没有位号的标识类图元（网络标识/端口/标签）被丢掉了多少条 */
     skippedNonPartSymbols: skippedWithoutDesignator,
     switchedToSchematic: switched || undefined,
@@ -219,15 +244,117 @@ export async function getSchematicState(params?: {
   };
 }
 
+/**
+ * 收集网络名。三条路依次试，因为**在 EDA 3.2.166 上前两条都是空的**：
+ *
+ *   ① sch_Net.getAllNets()          —— 接口标着 @alpha，真机实测返回空数组
+ *   ② 网络标识/端口/标签这类图元     —— getAll 支持跨图页，能拿到全工程的网络名
+ *   ③ 当前页的导线                   —— 实测 83 根导线里 76 根带网络名，能用但只覆盖当前页
+ *
+ * 旧版读的是 sch_PrimitivePin.getAll()，那拿的是**符号编辑器里的引脚**，
+ * 在原理图页上恒为 0 条 —— 这就是「读不出网络」的由来。
+ */
+async function collectNets(): Promise<{ nets: any[]; netSource: string; netScope: string }> {
+  const api = edaApi();
+
+  // ① 官方的网络接口
+  try {
+    const rows = await api?.sch_Net?.getAllNets?.();
+    if (Array.isArray(rows) && rows.length > 0) {
+      const nets = rows
+        .map((n: any) => {
+          const name = String(n?.net || '').trim();
+          if (!name) return null;
+          const wires = Array.isArray(n?.wires) ? n.wires : [];
+          return {
+            name,
+            wireCount: wires.length,
+            pages: Array.from(
+              new Set(wires.map((w: any) => String(w?.pageName || '')).filter(Boolean)),
+            ),
+          };
+        })
+        .filter(Boolean);
+      if (nets.length > 0) return { nets, netSource: 'sch_Net', netScope: 'allPages' };
+    }
+  } catch {
+    /* 试下一条 */
+  }
+
+  // ② 网络标识 / 端口 / 标签 —— 这些是「器件」，所以能跨图页拿
+  const byName = new Map<string, { name: string; symbolCount: number }>();
+  for (const type of ['netlabel', 'netflag', 'netport']) {
+    try {
+      const rows = await api?.sch_PrimitiveComponent?.getAll?.(type, true);
+      for (const row of Array.isArray(rows) ? rows : []) {
+        const name = readFirstStringValue(row, ['getState_Net']);
+        if (!name) continue;
+        const hit = byName.get(name);
+        if (hit) hit.symbolCount += 1;
+        else byName.set(name, { name, symbolCount: 1 });
+      }
+    } catch {
+      /* 这一类拿不到就算了 */
+    }
+  }
+  if (byName.size > 0) {
+    return { nets: Array.from(byName.values()), netSource: 'netLabels', netScope: 'allPages' };
+  }
+
+  // ③ 当前页的导线兜底
+  try {
+    const rows = await api?.sch_PrimitiveWire?.getAll?.();
+    const counter = new Map<string, number>();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const name = readFirstStringValue(row, ['getState_Net', 'getState_NetName']);
+      if (!name) continue;
+      counter.set(name, (counter.get(name) || 0) + 1);
+    }
+    if (counter.size > 0) {
+      return {
+        nets: Array.from(counter.entries()).map(([name, wireCount]) => ({ name, wireCount })),
+        netSource: 'wires',
+        netScope: 'currentPage',
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+
+  return { nets: [], netSource: 'none', netScope: 'none' };
+}
+
+/**
+ * 导网表。
+ *
+ * ⚠ **别用 `sch_Netlist.getNetlist()`**：官方已经把它标成 `@deprecated`，
+ * 真机上调它会**永远不返回**（等满 60 秒被上层超时掐掉，而且期间整条链路被占着）。
+ * 官方指定的替代是 `sch_ManufactureData.getNetlistFile()`，返回一个 File。
+ */
 export async function getNetlist(params: { type?: string }): Promise<any> {
   const api = edaApi();
-  if (!api?.sch_Netlist?.getNetlist) throw new Error('这版 嘉立创EDA 不支持导出网表');
   const { switched } = await ensureSchematicActive();
-  const netlist = await api.sch_Netlist.getNetlist(params?.type);
-  return {
-    netlist: typeof netlist === 'string' ? netlist : JSON.stringify(netlist),
-    switchedToSchematic: switched || undefined,
-  };
+  const type = params?.type || 'JLCEDA';
+
+  if (api?.sch_ManufactureData?.getNetlistFile) {
+    const file = await api.sch_ManufactureData.getNetlistFile('netlist', type);
+    if (file && typeof file.text === 'function') {
+      const text = await file.text();
+      return {
+        netlist: text,
+        type,
+        bytes: text.length,
+        source: 'sch_ManufactureData.getNetlistFile',
+        switchedToSchematic: switched || undefined,
+      };
+    }
+    throw new Error(`导出网表失败：getNetlistFile 没有返回文件（type=${type}）`);
+  }
+
+  throw new Error(
+    '这版 嘉立创EDA 没有 sch_ManufactureData.getNetlistFile。' +
+      '老的 sch_Netlist.getNetlist 已被官方废弃且实测会卡死，所以不再退回去用它。',
+  );
 }
 
 export async function runSchDrc(params: { strict?: boolean }): Promise<any> {

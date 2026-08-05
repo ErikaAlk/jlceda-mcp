@@ -106,6 +106,18 @@ const HANDLERS: Record<string, Handler> = {
 
 export const ACTIONS = Object.keys(HANDLERS).sort();
 
+/**
+ * 单条命令的上限。
+ *
+ * 存在的理由：**EDA 的 API 真的会永远不返回**。实测 `sch_Netlist.getNetlist()`
+ * （官方已废弃的那个）调下去就再也没有下文，而 mcp 侧要等满 60 秒才超时——
+ * 这期间整条链路被这一条命令占着，别的命令也发不动。
+ *
+ * 取 45 秒：比 mcp 侧的 60 秒短，这样超时报出来的是**扩展这边知道动作名的那条消息**，
+ * 而不是一句笼统的「命令超时」。真正的重活（大板 DRC、自动排丝印）实测都在十几秒内。
+ */
+const COMMAND_TIMEOUT_MS = 45_000;
+
 export async function execute(action: string, params: Record<string, any>): Promise<any> {
   const handler = HANDLERS[action];
   if (!handler) {
@@ -113,5 +125,24 @@ export async function execute(action: string, params: Record<string, any>): Prom
       `不认识的动作 '${action}'。这个扩展（v${APP_VERSION}）支持：${ACTIONS.join(', ')}`,
     );
   }
-  return await handler(params || {});
+
+  let timer: any;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `动作 '${action}' 超过 ${COMMAND_TIMEOUT_MS / 1000} 秒还没返回，判定 嘉立创EDA 那边卡住了。` +
+              `（EDA 的部分接口确实会永不返回，比如已废弃的 sch_Netlist.getNetlist）`,
+          ),
+        ),
+      COMMAND_TIMEOUT_MS,
+    );
+  });
+
+  try {
+    return await Promise.race([Promise.resolve(handler(params || {})), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
