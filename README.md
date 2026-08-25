@@ -1,4 +1,4 @@
-# jlceda-mcp —— 让 Claude Code 直接操作 嘉立创EDA 专业版
+# jlceda-mcp
 
 把 嘉立创EDA 专业版接到 Claude Code：读 PCB / 原理图、移元件、走线、打过孔、铺铜、
 跑 DRC、排丝印，全都可以让 AI 直接做。
@@ -7,7 +7,7 @@
 Claude Code ⇄ mcp-server（内含 broker） ⇄ 嘉立创EDA 的 JLC MCP 扩展
 ```
 
-**只有两段。** 不需要额外启动任何东西 —— 起 Claude Code 就等于起了桥接服务。
+只有两段，不需要额外启动任何东西：起 Claude Code 就等于起了桥接服务。
 
 ---
 
@@ -74,7 +74,7 @@ jlc-bridge/build/jlc-bridge.eext
 | 计算 | `calc_impedance`（含反算线宽）`calc_trace_width`（IPC-2221） |
 | 诊断 | `pcb_ping` `pcb_get_feature_support` `bridge_status` |
 
-`bridge_status` **不需要 EDA 在线也能回答** —— 专门用来分辨「是 EDA 没连上」还是「命令本身失败」。
+`bridge_status` **不需要 EDA 在线也能回答**，专门用来分辨「是 EDA 没连上」还是「命令本身失败」。
 
 另有 `pcb_agent`（黑箱自动模式），需要额外的 `ANTHROPIC_API_KEY`，默认不注册。
 
@@ -84,10 +84,10 @@ jlc-bridge/build/jlc-bridge.eext
 
 菜单里有四个自查入口，从上往下用：
 
-1. **状态** —— 秒开，显示连了多久、收发了多少、最近的错误是什么
-2. **自检：读一次当前 PCB** —— 不碰网络。它成功而链路没通 ⇒ 问题在 Claude Code 那侧
-3. **查看运行日志** —— 扩展自己的日志，连不上时把它发给 Claude 看
-4. **连不上怎么办** —— 按顺序列出四种常见原因
+1. 状态：秒开，显示连了多久、收发了多少、最近的错误是什么
+2. 自检：读一次当前 PCB，不碰网络。它成功而链路没通 ⇒ 问题在 Claude Code 那侧
+3. 查看运行日志：扩展自己的日志，连不上时把它发给 Claude 看
+4. 连不上怎么办：按顺序列出四种常见原因
 
 命令行侧：
 
@@ -121,15 +121,15 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 
 测试分四层，一层比一层接近真机：
 
-- **`tests/extension.test.mjs`** —— 把**真实打包产物**装进一个复刻的 EDA 沙箱里跑
+- `tests/extension.test.mjs`：把**真实打包产物**装进一个复刻的 EDA 沙箱里跑
   （`tests/eda-sandbox.mjs` 照着 EDA 安装目录里 `api.js` 的 `Tg` / `xg` / `Ta` 逐段抄的，
   包括「每次调用都重新求值整个 bundle」这条最要命的行为）。
   用户报过的每个症状都在这里有一条断言钉着。
-- **`tests/broker.test.mjs`** —— 真端口、真 WebSocket，只有 EDA 那头是假的。
+- `tests/broker.test.mjs`：真端口、真 WebSocket，只有 EDA 那头是假的。
   覆盖转发、竞选、断线、网页来源拦截。
-- **`tests/reconnect-live.test.mjs`** —— 把上面两半接起来：**真实扩展产物 + 真 socket + 真 broker**，
+- `tests/reconnect-live.test.mjs`：把上面两半接起来，**真实扩展产物 + 真 socket + 真 broker**，
   按「先开 EDA、后开 Claude Code」的顺序跑通一条真命令。唯一缺的只有 EDA 本体。
-- **`tests/server.test.mjs`** —— 真起 `dist/index.js` 走 stdio，验证构建产物能被 Claude Code 加载。
+- `tests/server.test.mjs`：真起 `dist/index.js` 走 stdio，验证构建产物能被 Claude Code 加载。
 
 改了协议要**同时**改 `src/protocol.ts` 和 `jlc-bridge/src/protocol.ts`（两份逐字对齐）。
 
@@ -139,7 +139,13 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 
 ## 更新记录
 
-### v0.2.0 —— 2026-08-04
+### 未发布（2026-08-25）
+
+只动 README。标题从 `# jlceda-mcp —— 让 Claude Code 直接操作 嘉立创EDA 专业版`
+收成 `# jlceda-mcp`，正下方那段本来就把这件事说清楚了。正文里的破折号
+22 → 0，几处列表项开头的加粗标签去掉。内容一条没删，没有出新版本。
+
+### v0.2.0（2026-08-04）
 
 整个重构了一遍。用户报的三个问题各有各的根因：
 
@@ -148,7 +154,7 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 现在状态只读内存里的缓存，秒开；而且状态直接写在菜单标题上，多数时候不用点开。
 
 **② 「连不上 WebSocket」**
-根因不在扩展 —— 旧架构是三段，中间那个 gateway 是要**手动双击 .bat** 才启动的。
+根因不在扩展，旧架构是三段，中间那个 gateway 是要**手动双击 .bat** 才启动的。
 排查时 18800 端口上一个监听都没有。现在 broker 内嵌进 mcp-server，起 Claude Code 就有；
 多个 Claude Code 会话会自动竞选，谁先起来谁当 broker。
 （顺带确认了：扩展的「允许外部交互」权限一直是勾着的，不是权限问题。）
@@ -162,25 +168,25 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 
 顺带修掉的哑 bug（都是「不报错但结果是错的」那种）：
 
-- `pcb_auto_silkscreen` 调了一个从来没定义过的 `round3()` —— 一调用就 ReferenceError，
+- `pcb_auto_silkscreen` 调了一个从来没定义过的 `round3()`，一调用就 ReferenceError，
   也就是说这个工具从来没成功跑过
-- `pcb_create_via` 发 `drill`、扩展只认 `holeDiameter` —— 钻孔尺寸被静默丢掉，
+- `pcb_create_via` 发 `drill`、扩展只认 `holeDiameter`，钻孔尺寸被静默丢掉，
   所有过孔都按默认 10 mil 建出来
-- `pcb_create_diff_pair` 发 `posNet/negNet`、扩展只认 `positiveNet/negativeNet` ——
+- `pcb_create_diff_pair` 发 `posNet/negNet`、扩展只认 `positiveNet/negativeNet`，
   每次都报「缺参数」
 - `pcb_get_pads` 的 `designator` 参数被静默忽略，查谁都返回全部焊盘
-- `pcb_screenshot` 读 `data.image`、扩展给的是 `data.imageDataUrl` —— 从来没返回过图片
+- `pcb_screenshot` 读 `data.image`、扩展给的是 `data.imageDataUrl`，从来没返回过图片
 - `pcb_get_silkscreens` 从不传 `includeConflicts`，扩展里那套冲突检测等于永远关着
-- `pcb_get_board_info` 找的是 `info.sch.uuid`，而 EDA 给的是 `info.schematic.uuid` ——
+- `pcb_get_board_info` 找的是 `info.sch.uuid`，而 EDA 给的是 `info.schematic.uuid`，
   `schematicUuid` 一直返回空串，`sch_*` 那几个工具和「切到原理图」都没法用
   （这条是接上真机之后第一次调用才发现的）
 - 原理图那一整块基本是废的（真机上量出来的）：
-  `sch_PrimitiveComponent.getAll()` 不传器件类型，会把网络标识/端口/标签也当成元件返回
-  —— 实测 311 条里只有 164 条有位号，所以看着像「元件字段全是空的」；
+  `sch_PrimitiveComponent.getAll()` 不传器件类型，会把网络标识/端口/标签也当成元件返回，
+  实测 311 条里只有 164 条有位号，所以看着像「元件字段全是空的」；
   `value` 读的是不存在的 `getState_Value()`（真值在 `getState_OtherProperty()` 里）；
   库引用读的是不存在的 `getState_LibraryUuid()`（真接口是 `getState_Component()`）；
   网络读的是 `sch_PrimitivePin.getAll()`，那个拿的是**符号编辑器里的引脚**，
-  在原理图页上恒为 0 条 —— 网络得走 `sch_Net.getAllNets()`
+  在原理图页上恒为 0 条，网络得走 `sch_Net.getAllNets()`
 - **原理图的 API 只在「当前打开的是原理图页」时才工作**。在 PCB 页上调 `sch_run_drc`，
   EDA 回一句 `doctype(3) not support`（3 = PCB），光看这句猜不到是标签页不对。
   现在 `sch_*` 三个命令都会先自动切过去，并在返回值里说明切过（`switchedToSchematic`）
@@ -212,7 +218,7 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 - 加了 42 项自动化测试，其中扩展那组是把真实产物装进复刻的 EDA 沙箱里跑的
 - 旧配置里的 `GATEWAY_WS_URL` 仍然认（只取里面的端口），换新版不用改 `~/.claude.json`
 - **先开 EDA、后开 Claude Code 也会自己连上**：`sys_WebSocket` 连不上时一个回调都不给，
-  没有连接超时的话状态会永远停在「正在连接」、心跳再也不会重新 register ——
+  没有连接超时的话状态会永远停在「正在连接」、心跳再也不会重新 register，
   表现就是「必须手动点一次重连」。现在 1.8 秒没通就推倒重来，每 2 秒重试一次；
   broker 收到 hello 也会立刻回一帧，不用等它下一次心跳
 - 对端消失（Claude Code 退出）时改由扩展主动 ping 探活，2 秒左右就发现，
@@ -220,7 +226,7 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 - 菜单不再自相矛盾：状态行和「暂停/恢复」那一项以前分别读 `phase` 和 `enabled`，
   两者一旦不同步就出现「状态行写着已暂停、下面却摆着『暂停桥接』」。现在同源推导。
   根因是 `boot()` 每次都用存盘值覆盖内存里的开关，而 `sys_Storage` 的写是异步的、
-  失败还被吞掉 —— 存盘一失败，用户刚点下的暂停就被读回来的旧值冲掉了
+  失败还被吞掉，存盘一失败，用户刚点下的暂停就被读回来的旧值冲掉了
 
 ### v0.1.x
 
