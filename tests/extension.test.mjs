@@ -819,9 +819,12 @@ test('搬迁元件时删掉连到它焊盘上的走线，别的走线不动', { 
 
 // ─── 丝印 ───
 //
-// 文本、焊盘、过孔照 api-types.d.ts 逐个 getter 造。文本图元 IPCB_PrimitiveString 没有
+// 文本、属性、焊盘、过孔照 api-types.d.ts 逐个 getter 造。文本图元 IPCB_PrimitiveString 没有
 // getState_Content / getState_CenterX / getState_ParentPrimitiveId；焊盘图元没有 getState_Diameter /
 // getState_PadDiameter。原来焊盘取不到外框时拿这两个不存在的 getter 算避让框，读空之后按 10 mil 见方去判冲突。
+//
+// 元件位号、值这些挂在元件上的文字是属性图元 IPCB_PrimitiveAttribute。pcb_PrimitiveString.getAll() 不给它们
+// （pcb.js 里按 !getParent() 过滤了），原来只读文本，真机上一块摆满元件的板查出来 0 条丝印，位号从来没被挪过。
 
 function pcbString({ id, text, x, y, layer }) {
   return {
@@ -859,8 +862,51 @@ function pcbVia({ id, net, x, y, diameter }) {
   };
 }
 
-/** withoutBox：让 getPrimitivesBBox 对这个图元给 undefined */
-function silkBoardMock({ withoutBox } = {}) {
+/** IPCB_PrimitiveAttribute 的全部 getter。坐标单位 mil（api.js 里是画布坐标 × 10） */
+function pcbAttribute({ id, parentId, key, value, keyVisible = false, valueVisible, x, y, layer }) {
+  return {
+    getState_PrimitiveType: () => 'Attribute',
+    getState_PrimitiveId: () => id,
+    getState_ParentPrimitiveId: () => parentId,
+    getState_Layer: () => layer,
+    getState_X: () => x,
+    getState_Y: () => y,
+    getState_Key: () => key,
+    getState_Value: () => value,
+    getState_KeyVisible: () => keyVisible,
+    getState_ValueVisible: () => valueVisible,
+    getState_FontFamily: () => 'default',
+    getState_FontSize: () => 12,
+    getState_LineWidth: () => 2,
+    getState_AlignMode: () => 5,
+    getState_Rotation: () => 0,
+    getState_Reverse: () => false,
+    getState_Expansion: () => 0,
+    getState_Mirror: () => false,
+    getState_PrimitiveLock: () => false,
+  };
+}
+
+// EDA 给每个元件挂一整串属性（Designator、Value、Footprint……），多数是隐藏的。
+// 隐藏的属性可能没有摆放位置，这时 pcb.js 把位置记成原点，api.js 给出来的坐标是 (0, 0)。
+// 不该收进来的属性都不给外框：收进来就会当场报「取不到外框」。
+const SILK_ATTRIBUTES = [
+  // R1 的位号，压在 pad1 上
+  pcbAttribute({ id: 'a1', parentId: 'c1', key: 'Designator', value: 'R1', valueVisible: true, x: 440, y: 290, layer: 3 }),
+  pcbAttribute({ id: 'a2', parentId: 'c1', key: 'Value', value: '10k', valueVisible: false, x: 0, y: 0, layer: 3 }),
+  pcbAttribute({ id: 'a3', parentId: 'c1', key: 'Footprint', value: 'R0603', valueVisible: false, x: 0, y: 0, layer: 3 }),
+  // C1 的位号在底层丝印，周围空着
+  pcbAttribute({ id: 'a4', parentId: 'c2', key: 'Designator', value: 'C1', valueVisible: true, x: 700, y: 700, layer: 4 }),
+  // 显示着，但在顶层装配层（9），不是丝印
+  pcbAttribute({ id: 'a5', parentId: 'c2', key: 'Value', value: '100nF', valueVisible: true, x: 700, y: 720, layer: 9 }),
+  // 勾了显示但值是空的，画布上一个字都没有
+  pcbAttribute({ id: 'a6', parentId: 'c2', key: 'Manufacturer Part', value: '', valueVisible: true, x: 700, y: 740, layer: 4 }),
+  // Key 和 Value 都显示
+  pcbAttribute({ id: 'a7', parentId: 'c1', key: 'Tolerance', value: '1%', keyVisible: true, valueVisible: true, x: 600, y: 500, layer: 3 }),
+];
+
+/** withoutBox：让 getPrimitivesBBox 对这个图元给 undefined；attributes：元件挂着的属性 */
+function silkBoardMock({ withoutBox, attributes = [] } = {}) {
   const boxes = {
     outline: { minX: 0, minY: 0, maxX: 1000, maxY: 1000 },
     // 80×50 的大焊盘，中心 (440, 305)
@@ -870,6 +916,9 @@ function silkBoardMock({ withoutBox } = {}) {
     s1: { minX: 462, minY: 326, maxX: 486, maxY: 342 },
     s2: { minX: 190, minY: 210, maxX: 210, maxY: 220 },
     s3: { minX: 430, minY: 300, maxX: 450, maxY: 310 },
+    a1: { minX: 430, minY: 284, maxX: 450, maxY: 296 },
+    a4: { minX: 690, minY: 695, maxX: 710, maxY: 705 },
+    a7: { minX: 570, minY: 495, maxX: 630, maxY: 505 },
   };
   delete boxes[withoutBox];
 
@@ -879,18 +928,43 @@ function silkBoardMock({ withoutBox } = {}) {
     // 顶层铜皮上的文字，不是丝印
     pcbString({ id: 's3', text: 'NOTE', x: 440, y: 305, layer: 1 }),
   ];
+  const components = [
+    pcbComponent({ id: 'c1', designator: 'R1', x: 440, y: 305, pads: [] }),
+    pcbComponent({ id: 'c2', designator: 'C1', x: 700, y: 720, pads: [] }),
+  ];
   const moved = [];
+  const movedAttributes = [];
   return {
     moved,
+    movedAttributes,
     api: {
       pcb_Primitive: { getPrimitivesBBox: bboxLookup(boxes) },
       pcb_PrimitiveString: {
         getAll: async (layer) => strings.filter((s) => layer === undefined || s.getState_Layer() === layer),
+        // api.js 按 ID 取不到文本时返回 undefined
         modify: async (id, property) => {
           moved.push({ id, property });
           return strings.find((s) => s.getState_PrimitiveId() === id);
         },
       },
+      pcb_PrimitiveAttribute: {
+        // 照 api.js：摊平全部元件的属性，再按父图元、层、锁定过滤
+        getAll: async (parentPrimitiveId, layer, primitiveLock) =>
+          attributes.filter(
+            (a) =>
+              (parentPrimitiveId === undefined || a.getState_ParentPrimitiveId() === parentPrimitiveId) &&
+              (layer === undefined || a.getState_Layer() === layer) &&
+              (primitiveLock === undefined || a.getState_PrimitiveLock() === primitiveLock),
+          ),
+        modify: async (id, property) => {
+          const row = attributes.find((a) => a.getState_PrimitiveId() === id);
+          // api.js 按 ID 取不到属性时拿到的是空数组，接着调 isAsync() 就抛了
+          if (!row) throw new TypeError('t.isAsync is not a function');
+          movedAttributes.push({ id, property });
+          return row;
+        },
+      },
+      pcb_PrimitiveComponent: { getAll: async () => components },
       pcb_PrimitivePad: {
         getAll: async () => [
           pcbPad({ id: 'pad1', padNumber: '1', net: '$1N16', x: 440, y: 305, pad: ['RECT', 80, 50, 0] }),
@@ -957,6 +1031,85 @@ test('焊盘或过孔取不到外框时直接报错，不许拿猜的框去判�
     assert.match(reply.error, new RegExp(`${kind} ${id} 取不到外框`));
     delete globalThis.__JLC_BRIDGE_HUB_V2__;
   }
+});
+
+test('位号这类元件属性也算丝印，带上所属元件，自动避让时走 pcb_PrimitiveAttribute.modify', { skip }, async () => {
+  const m = silkBoardMock({ attributes: SILK_ATTRIBUTES });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_silkscreens', { includeConflicts: true });
+  assert.equal(reply.ok, true, reply.error);
+  assert.deepEqual(
+    reply.data.silkscreens.map((s) => s.primitiveId),
+    ['s1', 's2', 'a1', 'a4', 'a7'],
+    '隐藏的、不在丝印层的、显示出来没有字的属性都不算丝印',
+  );
+  const byId = Object.fromEntries(reply.data.silkscreens.map((s) => [s.primitiveId, s]));
+  assert.equal(byId.s1.kind, 'string');
+  assert.equal('parentPrimitiveId' in byId.s1, false, '文本图元没有父图元');
+
+  const a1 = byId.a1;
+  assert.equal(a1.kind, 'attribute');
+  assert.equal(a1.text, 'R1');
+  assert.equal(a1.key, 'Designator');
+  assert.equal(a1.parentPrimitiveId, 'c1');
+  assert.equal(a1.designator, 'R1');
+  assert.equal(a1.x, 440);
+  assert.equal(a1.y, 290);
+  assert.equal(a1.layer, 3);
+  assert.deepEqual(a1.bbox, { minX: 430, minY: 284, maxX: 450, maxY: 296 });
+  assert.deepEqual(
+    a1.conflicts.map((c) => `${c.type}:${c.targetId}:${c.net}`),
+    ['overlap_pad:pad1:$1N16'],
+  );
+  assert.equal(byId.a4.designator, 'C1');
+  assert.equal(byId.a4.layer, 4);
+  assert.deepEqual(byId.a4.conflicts, []);
+  assert.equal(byId.a7.text, 'Tolerance:1%', 'Key 和 Value 都显示时画布上是「Key:Value」');
+
+  const auto = await runCommand(runtime, state, 'auto_silkscreen');
+  assert.equal(auto.ok, true, auto.error);
+  assert.deepEqual(m.movedAttributes.map((mv) => mv.id), ['a1'], '压着焊盘的位号要挪，走属性的 modify');
+  assert.deepEqual(m.moved.map((mv) => mv.id).sort(), ['s1', 's2'], '属性不能拿去调文本的 modify');
+  const a1Detail = auto.data.details.find((d) => d.primitiveId === 'a1');
+  assert.equal(a1Detail.designator, 'R1');
+  assert.equal(a1Detail.to.score, 0, 'a1 挪完还压着东西');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('pcb_move_silkscreen 按 primitiveId 分辨属性和文本，各走各的 modify', { skip }, async () => {
+  const m = silkBoardMock({ attributes: SILK_ATTRIBUTES });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const attr = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 'a1', x: 440, y: 250, rotation: 90 });
+  assert.equal(attr.ok, true, attr.error);
+  assert.equal(attr.data.kind, 'attribute');
+  assert.deepEqual(m.movedAttributes, [{ id: 'a1', property: { x: 440, y: 250, rotation: 90 } }]);
+  assert.deepEqual(m.moved, [], '属性不能拿去调文本的 modify');
+
+  const str = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 's1', x: 500, y: 400 });
+  assert.equal(str.ok, true, str.error);
+  assert.equal(str.data.kind, 'string');
+  assert.deepEqual(m.moved, [{ id: 's1', property: { x: 500, y: 400 } }]);
+
+  const missing = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 'nope', x: 0, y: 0 });
+  assert.equal(missing.ok, false, '找不到的图元不许报成功');
+  assert.match(missing.error, /nope/);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('丝印层上的属性取不到外框时直接报错并写出位号', { skip }, async () => {
+  const m = silkBoardMock({ attributes: SILK_ATTRIBUTES, withoutBox: 'a1' });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_silkscreens');
+  assert.equal(reply.ok, false, '位号没有外框时不该给出一份丝印列表');
+  assert.match(reply.error, /R1/);
+  assert.match(reply.error, /a1 取不到外框/);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
 // ─── 原理图 ───

@@ -592,9 +592,10 @@ export async function getFeatureSupport(): Promise<any> {
       renderedAreaImage: Boolean(api?.dmt_EditorControl?.getCurrentRenderedAreaImage),
       exportImage: Boolean(api?.pcb_Document?.exportImage),
     },
+    // 丝印包括文本和元件属性（位号等），两种图元都要能查、能改
     silkscreen: {
-      query: Boolean(api?.pcb_PrimitiveString?.getAll),
-      modify: Boolean(api?.pcb_PrimitiveString?.modify),
+      query: Boolean(api?.pcb_PrimitiveString?.getAll && api?.pcb_PrimitiveAttribute?.getAll),
+      modify: Boolean(api?.pcb_PrimitiveString?.modify && api?.pcb_PrimitiveAttribute?.modify),
     },
     via: {
       create: Boolean(api?.pcb_PrimitiveVia?.create),

@@ -16,6 +16,19 @@ import { getBoardBoundingBox, getSelectedPrimitiveIdSet } from './pcb-state';
 const SILKSCREEN_LAYERS = new Set<number>([3, 4]);
 
 /**
+ * 丝印上的字来自两种图元，挪位置要走各自的 modify：
+ * - 文本 IPCB_PrimitiveString：直接放在板上的文字。pcb_PrimitiveString.getAll() 只给这种（pcb.js 里按 !getParent() 过滤了）。
+ * - 属性 IPCB_PrimitiveAttribute：挂在元件上的文字，位号、值都是这种，由 pcb_PrimitiveAttribute.getAll() 给出。
+ */
+type SilkRow =
+  | { kind: 'string'; row: IPCB_PrimitiveString }
+  | { kind: 'attribute'; row: IPCB_PrimitiveAttribute; designator: string };
+
+type SilkKind = SilkRow['kind'];
+
+type SilkMove = { x: number; y: number; rotation?: number };
+
+/**
  * 图元外框（画布坐标，mil）。
  * 丝印和避让目标都用 EDA 自己算的外框：异形焊盘、旋转、文字字形都已经算进去了。
  * 取不到就报错，免得拿一个猜出来的框去判冲突、挪丝印。
@@ -30,22 +43,100 @@ async function primitiveBox(kind: string, primitiveId: string): Promise<Box> {
   return box;
 }
 
-/** 顶层、底层丝印上的文本。pcb_PrimitiveString 只给不挂在元件上的文本，元件位号不在里面。 */
-async function collectSilkscreenRows(): Promise<IPCB_PrimitiveString[]> {
-  const api = edaApi();
-  if (!api?.pcb_PrimitiveString?.getAll) throw new Error('这版 嘉立创EDA 不支持文本查询');
-  const rows: IPCB_PrimitiveString[] = await api.pcb_PrimitiveString.getAll();
-  return rows.filter((row) => SILKSCREEN_LAYERS.has(row.getState_Layer()));
+/** 属性在画布上有没有字。EDA 自己挪属性文字前也是这么判断的（pcb.js 的 modifyAttrPosition） */
+function attributeShowsText(row: IPCB_PrimitiveAttribute): boolean {
+  return (
+    (row.getState_KeyVisible() && row.getState_Key() !== '') ||
+    (row.getState_ValueVisible() && row.getState_Value() !== '')
+  );
 }
 
-async function buildSilkscreenItem(row: IPCB_PrimitiveString, selectedSet: Set<string>): Promise<any> {
+/** 属性在画布上显示的字，和 pcb.js 的 getText() 一致：Key、Value 都显示时是「Key:Value」 */
+function attributeText(row: IPCB_PrimitiveAttribute): string {
+  const key = row.getState_Key();
+  const value = row.getState_Value();
+  if (row.getState_KeyVisible()) return row.getState_ValueVisible() ? `${key}:${value}` : key;
+  return value;
+}
+
+/** 顶层、底层丝印上的文本，加上丝印层上显示出字来的元件属性（位号等） */
+async function collectSilkscreenRows(): Promise<SilkRow[]> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveString?.getAll) throw new Error('这版 嘉立创EDA 不支持文本查询');
+  if (!api?.pcb_PrimitiveAttribute?.getAll) throw new Error('这版 嘉立创EDA 不支持元件属性查询，读不到位号');
+  if (!api?.pcb_PrimitiveComponent?.getAll) {
+    throw new Error('这版 嘉立创EDA 不支持元件查询，查不出属性属于哪个元件');
+  }
+
+  const rows: SilkRow[] = [];
+  const strings: IPCB_PrimitiveString[] = await api.pcb_PrimitiveString.getAll();
+  for (const row of strings) {
+    if (SILKSCREEN_LAYERS.has(row.getState_Layer())) rows.push({ kind: 'string', row });
+  }
+
+  const components: IPCB_PrimitiveComponent[] = await api.pcb_PrimitiveComponent.getAll();
+  const designators = new Map<string, string>();
+  for (const component of components) {
+    designators.set(component.getState_PrimitiveId(), component.getState_Designator() ?? '');
+  }
+  // 列表里是全部元件的全部属性，多数是隐藏的（Key、Value 都不显示），
+  // 隐藏属性可能没有摆放位置，这时 pcb.js 把位置记成原点
+  const attributes: IPCB_PrimitiveAttribute[] = await api.pcb_PrimitiveAttribute.getAll();
+  for (const row of attributes) {
+    if (!SILKSCREEN_LAYERS.has(row.getState_Layer()) || !attributeShowsText(row)) continue;
+    const parentId = row.getState_ParentPrimitiveId();
+    const designator = designators.get(parentId);
+    // pcb.js 里这两个接口遍历的是同一批元件，对不上说明 EDA 的数据变了
+    if (designator === undefined) {
+      throw new Error(`属性 ${row.getState_PrimitiveId()} 的父图元 ${parentId} 不在元件列表里`);
+    }
+    rows.push({ kind: 'attribute', row, designator });
+  }
+  return rows;
+}
+
+/** 文本和属性各自的字段，属性多带 Key、Value 和所属元件；label 用在报错里 */
+function ownFields(silk: SilkRow): { label: string; fields: Record<string, unknown> } {
+  if (silk.kind === 'string') {
+    const { row } = silk;
+    return {
+      label: '丝印',
+      fields: { kind: 'string', text: row.getState_Text(), x: row.getState_X(), y: row.getState_Y() },
+    };
+  }
+
+  const { row, designator } = silk;
+  const key = row.getState_Key();
+  const x = row.getState_X();
+  const y = row.getState_Y();
+  // api-types 里属性坐标的类型是 number | null。pcb.js 只会把隐藏的属性标成没有摆放位置（positionIsNull），
+  // 显示着的属性拿到 null 说明 EDA 的数据格式变了
+  if (x === null || y === null) {
+    throw new Error(`元件 ${designator} 的 ${key} 属性 ${row.getState_PrimitiveId()} 显示在丝印上，却没有坐标`);
+  }
+  return {
+    label: `元件 ${designator} 的 ${key} 属性`,
+    fields: {
+      kind: 'attribute',
+      text: attributeText(row),
+      key,
+      value: row.getState_Value(),
+      parentPrimitiveId: row.getState_ParentPrimitiveId(),
+      designator,
+      x,
+      y,
+    },
+  };
+}
+
+async function buildSilkscreenItem(silk: SilkRow, selectedSet: Set<string>): Promise<any> {
+  const { row } = silk;
   const primitiveId = row.getState_PrimitiveId();
-  const bbox = await primitiveBox('丝印', primitiveId);
+  const { label, fields } = ownFields(silk);
+  const bbox = await primitiveBox(label, primitiveId);
   return {
     primitiveId,
-    text: row.getState_Text(),
-    x: row.getState_X(),
-    y: row.getState_Y(),
+    ...fields,
     rotation: row.getState_Rotation(),
     fontSize: row.getState_FontSize(),
     layer: row.getState_Layer(),
@@ -191,24 +282,70 @@ export async function getSilkscreens(params?: {
   };
 }
 
+function assertCanModify(): void {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveString?.modify || !api?.pcb_PrimitiveAttribute?.modify) {
+    throw new Error('这版 嘉立创EDA 不支持修改丝印文本或元件属性');
+  }
+}
+
+/**
+ * 按图元种类走各自的 modify。
+ * 文本的 modify 找不到图元时返回 undefined；属性的 modify 找不到图元、参数不对时直接抛错。
+ */
+async function modifySilkscreen(kind: SilkKind, primitiveId: string, property: SilkMove): Promise<void> {
+  const api = edaApi();
+  if (kind === 'attribute') {
+    const result: IPCB_PrimitiveAttribute | undefined = await api.pcb_PrimitiveAttribute.modify(primitiveId, property);
+    if (!result) throw new Error(`元件属性 ${primitiveId} 没改成：EDA 没有返回改完的图元`);
+    return;
+  }
+  const result: IPCB_PrimitiveString | undefined = await api.pcb_PrimitiveString.modify(primitiveId, property);
+  if (!result) throw new Error(`文本 ${primitiveId} 没改成：EDA 找不到这个图元`);
+}
+
+/**
+ * 按图元 ID 认出是文本还是元件属性。
+ * 不用 pcb_PrimitiveAttribute.get()：api.js 里它按单个 ID 查不到时返回空数组（类型声明写的是 undefined）。
+ */
+async function resolveSilkKind(primitiveId: string): Promise<SilkKind> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveString?.getAll || !api?.pcb_PrimitiveAttribute?.getAll) {
+    throw new Error('这版 嘉立创EDA 不支持文本或元件属性查询，认不出这个图元');
+  }
+  const attributes: IPCB_PrimitiveAttribute[] = await api.pcb_PrimitiveAttribute.getAll();
+  if (attributes.some((row) => row.getState_PrimitiveId() === primitiveId)) return 'attribute';
+  const strings: IPCB_PrimitiveString[] = await api.pcb_PrimitiveString.getAll();
+  if (strings.some((row) => row.getState_PrimitiveId() === primitiveId)) return 'string';
+  throw new Error(`找不到图元 ${primitiveId}：它既不是文本，也不是元件属性`);
+}
+
+/** 挪一条丝印。primitiveId 可以是文本，也可以是元件属性（位号等），按种类走各自的 modify */
 export async function moveSilkscreen(params: {
   primitiveId: string;
   x: number;
   y: number;
   rotation?: number;
 }): Promise<any> {
-  const api = edaApi();
   if (!params?.primitiveId) throw new Error('需要 primitiveId');
   if (!Number.isFinite(Number(params?.x)) || !Number.isFinite(Number(params?.y))) {
     throw new Error('x/y 必须是数字');
   }
-  if (!api?.pcb_PrimitiveString?.modify) throw new Error('这版 嘉立创EDA 不支持修改丝印');
+  assertCanModify();
 
-  const property: any = { x: Number(params.x), y: Number(params.y) };
+  const primitiveId = String(params.primitiveId);
+  const property: SilkMove = { x: Number(params.x), y: Number(params.y) };
   if (params.rotation !== undefined) property.rotation = Number(params.rotation);
 
-  await api.pcb_PrimitiveString.modify(String(params.primitiveId), property);
-  return { primitiveId: String(params.primitiveId), ...property };
+  const kind = await resolveSilkKind(primitiveId);
+  await modifySilkscreen(kind, primitiveId, property);
+  return { primitiveId, kind, ...property };
+}
+
+/** 自动避让结果里认图元用的字段，属性多给所属元件的位号 */
+function describeItem(item: any): Record<string, unknown> {
+  const base = { primitiveId: item.primitiveId, kind: item.kind, text: item.text };
+  return item.kind === 'attribute' ? { ...base, designator: item.designator } : base;
 }
 
 function translatedBox(item: any, x: number, y: number, rotation: number): Box {
@@ -232,8 +369,7 @@ export async function autoSilkscreen(params?: {
   tryAngles?: number[];
   onlyConflicted?: boolean;
 }): Promise<any> {
-  const api = edaApi();
-  if (!api?.pcb_PrimitiveString?.modify) throw new Error('这版 嘉立创EDA 不支持修改丝印');
+  assertCanModify();
 
   const maxMoves = Math.max(1, Math.floor(toFinite(params?.maxMoves, 80)));
   const step = Math.max(2, toFinite(params?.step, 12));
@@ -315,7 +451,7 @@ export async function autoSilkscreen(params?: {
     }
 
     if (best.score < originalScore) {
-      await api.pcb_PrimitiveString.modify(primitiveId, {
+      await modifySilkscreen(item.kind, primitiveId, {
         x: best.x,
         y: best.y,
         rotation: best.rotation,
@@ -323,16 +459,14 @@ export async function autoSilkscreen(params?: {
       moved += 1;
       fixedBoxes.set(primitiveId, translatedBox(item, best.x, best.y, best.rotation));
       details.push({
-        primitiveId,
-        text: item.text,
+        ...describeItem(item),
         from: { x: ox, y: oy, rotation: orot, score: originalScore },
         to: { x: best.x, y: best.y, rotation: best.rotation, score: best.score },
       });
     } else {
       skipped += 1;
       details.push({
-        primitiveId,
-        text: item.text,
+        ...describeItem(item),
         from: { x: ox, y: oy, rotation: orot, score: originalScore },
         skipped: true,
       });
