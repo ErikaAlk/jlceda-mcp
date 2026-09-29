@@ -766,7 +766,8 @@ function pcbFill({ id, net, layer = 1 }) {
   };
 }
 
-function relocateBoardMock() {
+/** modifyFails：移动元件时照 api.js 抛错（pcb.js 的 component-modify 返回 null 时就是这样） */
+function relocateBoardMock({ modifyFails = false } = {}) {
   const R1 = '240bc228c1ee3a49';
   const H1 = '52930e4c1065e082';
   const U2 = '6b1f0c2d9e8a7f35';
@@ -855,6 +856,7 @@ function relocateBoardMock() {
           ? undefined
           : padsOf[id].map((p) => pcbComponentPad(id, p, connectedOf[p.id] ?? [])),
       modify: async (id, property) => {
+        if (modifyFails) throw new Error('错误：对象参数不正确，无法应用到画布。');
         modified.push({ id, property });
         return components.find((c) => c.getState_PrimitiveId() === id);
       },
@@ -927,6 +929,19 @@ test('连到焊盘上的直线或圆弧被锁定时直接报错，一条都不�
   assert.deepEqual(m.deleted.lines, [], '没锁的 u1 也不能先删掉');
   assert.deepEqual(m.deleted.arcs, []);
   assert.deepEqual(m.modified, []);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('移动元件失败时一条走线都不删', { skip }, async () => {
+  const m = relocateBoardMock({ modifyFails: true });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'relocate_component', { designator: 'R1', x: 600, y: 410 });
+  assert.equal(reply.ok, false);
+  assert.match(reply.error, /对象参数不正确/);
+  assert.deepEqual(m.deleted.lines, []);
+  assert.deepEqual(m.deleted.arcs, []);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 

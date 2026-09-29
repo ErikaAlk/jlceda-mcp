@@ -48,15 +48,19 @@ export async function moveComponent(params: {
 }
 
 /**
- * 搬迁元件：先把直接连到它焊盘上的走线删掉，再移动，避免留下一堆斜拉的残线。
+ * 搬迁元件：移动元件，并删掉直接连到它焊盘上的走线，避免留下一堆斜拉的残线。
  *
  * 焊盘图元 IPCB_PrimitivePad 没有位号和父元件 ID，这里用 getAllPinsByPrimitiveId() 直接拿元件的焊盘，
  * 给的是完整图元 ID，不含封装自带的过孔。
  * 哪些走线连着焊盘先交给 EDA 判断：getConnectedPrimitives() 走的是 EDA 的连接检查，只看同一网络，
  * 贴片焊盘只看同层、通孔焊盘各层都算，走线铜皮碰到焊盘铜皮就算，端点不在焊盘中心也算
  * （真机上通孔焊盘、大焊盘的走线端点常常离中心好几 mil）。
- * 其中只删端点落在焊盘上的直线和圆弧：只是从焊盘上穿过去的同网络走线两头还连着别处，删了会把那条连接断掉。
+ * 其中只删端点落在焊盘外框（四边放宽半个线宽）里的直线和圆弧：从焊盘上横穿过去的同网络走线两头还连着别处，
+ * 删了会把那条连接断掉。外框比铜皮大（圆形、旋转过的焊盘），横穿走线的拐点正好落在外框角上时仍会被删。
  * 过孔、填充区域不删。
+ *
+ * 先移动、后删：pcb.js 里移动元件只改元件自己的位置和属性，不碰走线，按移动前记下的 ID 照样删得到；
+ * 移动失败时一条走线都还没删。
  */
 export async function relocateComponent(params: {
   designator: string;
@@ -82,8 +86,12 @@ export async function relocateComponent(params: {
   const lines = new Map<string, IPCB_PrimitiveLine>();
   const arcs = new Map<string, IPCB_PrimitiveArc>();
   for (const pin of pins) {
-    const padId = pin.getState_PrimitiveId();
-    const padBox = await primitiveBox('焊盘', padId);
+    // 类型包只公开了 false 这个重载；它比 true 只多给填充区域，下面按类型跳过
+    const connected: Array<
+      IPCB_PrimitiveLine | IPCB_PrimitiveArc | IPCB_PrimitiveVia | IPCB_PrimitivePolyline | IPCB_PrimitiveFill
+    > = await pin.getConnectedPrimitives(false);
+    // 外框放在连接查询之后取：连接检查会先刷新焊盘外框，元件刚被挪过时先取可能拿到旧位置
+    const padBox = await primitiveBox('焊盘', pin.getState_PrimitiveId());
     // 端点离焊盘外框不到半个线宽，线头的圆帽就压在焊盘上
     const endsOnPad = (t: IPCB_PrimitiveLine | IPCB_PrimitiveArc) => {
       const margin = t.getState_LineWidth() / 2;
@@ -94,10 +102,6 @@ export async function relocateComponent(params: {
         y <= padBox.maxY + margin;
       return inside(t.getState_StartX(), t.getState_StartY()) || inside(t.getState_EndX(), t.getState_EndY());
     };
-    // 类型包只公开了 false 这个重载；它比 true 只多给填充区域，下面按类型跳过
-    const connected: Array<
-      IPCB_PrimitiveLine | IPCB_PrimitiveArc | IPCB_PrimitiveVia | IPCB_PrimitivePolyline | IPCB_PrimitiveFill
-    > = await pin.getConnectedPrimitives(false);
     for (const item of connected) {
       const type: string = item.getState_PrimitiveType();
       if (type === 'Line') {
@@ -117,15 +121,15 @@ export async function relocateComponent(params: {
       `连到 ${params.designator} 焊盘上的走线被锁定：${locked.join('、')}。解锁之后再搬，这次没有删任何走线，元件也没动`,
     );
   }
+  const rotation = params.rotation ?? targetRow.getState_Rotation();
+  await api.pcb_PrimitiveComponent.modify(targetId, { x: params.x, y: params.y, rotation });
+
   if (lines.size > 0) await api.pcb_PrimitiveLine.delete([...lines.keys()]);
   if (arcs.size > 0) await api.pcb_PrimitiveArc.delete([...arcs.keys()]);
   const deletedTracks = tracks.map((t) => t.getState_PrimitiveId());
   const uniqueNets = Array.from(
     new Set(pins.map((pin) => pin.getState_Net() ?? '').filter(Boolean)),
   );
-
-  const rotation = params.rotation ?? targetRow.getState_Rotation();
-  await api.pcb_PrimitiveComponent.modify(targetId, { x: params.x, y: params.y, rotation });
 
   return {
     moved: params.designator,
