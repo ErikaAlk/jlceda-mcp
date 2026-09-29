@@ -7,6 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import WebSocket from 'ws';
@@ -18,7 +19,21 @@ const BUNDLE = join(here, '..', 'jlc-bridge', 'dist', 'index.js');
 const skip = existsSync(BUNDLE) ? false : '扩展还没打包，先跑 npm run build:ext';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const PORT = 18931;
+
+/**
+ * 现取一个空闲端口。写死端口的话，本机只要有别的程序占着它，
+ * 第 ① 步「EDA 先起、端口上没有任何人」就不成立，broker 也起不来（EADDRINUSE）。
+ */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
 
 /**
  * 用真 socket 实现 sys_WebSocket，但**照 EDA 的语义**来：
@@ -85,6 +100,7 @@ function realWebSocketApi(state) {
 }
 
 test('先开 EDA、后开 Claude Code：真 socket 上也能自己连上并跑通命令', { skip }, async (t) => {
+  const port = await freePort();
   const linkState = { registerCount: 0 };
   const ws = realWebSocketApi(linkState);
 
@@ -111,7 +127,7 @@ test('先开 EDA、后开 Claude Code：真 socket 上也能自己连上并跑�
       },
       pcb_Net: { getAllNetsName: async () => ['GND'], getNetLength: async () => 1 },
     },
-    config: { bridgePort: PORT },
+    config: { bridgePort: port },
   });
 
   let broker;
@@ -122,7 +138,7 @@ test('先开 EDA、后开 Claude Code：真 socket 上也能自己连上并跑�
     delete globalThis.__JLC_BRIDGE_HUB_V2__;
   });
 
-  // ① 「EDA」先起来，此时 18931 上没有任何人
+  // ① 「EDA」先起来，此时这个端口上没有任何人
   const runtime = createEdaRuntime(BUNDLE, eda);
   await runtime.call('activate', 'onStartupFinished');
   await sleep(4500);
@@ -131,7 +147,7 @@ test('先开 EDA、后开 Claude Code：真 socket 上也能自己连上并跑�
   assert.ok(linkState.registerCount >= 2, `应该在反复重试，实际只试了 ${linkState.registerCount} 次`);
 
   // ② Claude Code 起来了
-  broker = await startBroker({ port: PORT });
+  broker = await startBroker({ port });
   await sleep(3000);
 
   assert.equal(
@@ -142,7 +158,7 @@ test('先开 EDA、后开 Claude Code：真 socket 上也能自己连上并跑�
   assert.ok(broker.edaInfo(), 'broker 那边也应该看得到 EDA 接入了');
 
   // ③ 真发一条命令，验证整条链路是活的
-  const client = new WebSocket(`ws://127.0.0.1:${PORT}/ws/bridge`);
+  const client = new WebSocket(`ws://127.0.0.1:${port}/ws/bridge`);
   await new Promise((r) => client.on('open', r));
   client.send(JSON.stringify({ v: 2, t: 'hello', role: 'mcp', name: 'test' }));
 
