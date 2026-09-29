@@ -10,27 +10,10 @@ import {
   toFinite,
   type Box,
 } from './util';
-import { getBoardBoundingBox, getSelectedPrimitiveIdSet } from './pcb-state';
+import { getBoardBoundingBox, getSelectedPrimitiveIdSet, primitiveBox } from './pcb-state';
 
 /** EDA 的层 ID：3 顶层丝印，4 底层丝印 */
 const SILKSCREEN_LAYERS = new Set<number>([3, 4]);
-
-/**
- * 图元外框（画布坐标，mil）。
- * 丝印和避让目标都用 EDA 自己算的外框：异形焊盘、旋转、文字字形都已经算进去了。
- * 取不到就报错，免得拿一个猜出来的框去判冲突、挪丝印。
- */
-async function primitiveBox(kind: string, primitiveId: string): Promise<Box> {
-  const api = edaApi();
-  if (!api?.pcb_Primitive?.getPrimitivesBBox) {
-    throw new Error('这版 嘉立创EDA 没有 pcb_Primitive.getPrimitivesBBox，算不出丝印和焊盘的外框');
-  }
-  const box: Box | undefined = await api.pcb_Primitive.getPrimitivesBBox([primitiveId]);
-  if (!box || ![box.minX, box.minY, box.maxX, box.maxY].every(Number.isFinite)) {
-    throw new Error(`${kind} ${primitiveId} 取不到外框：${JSON.stringify(box)}`);
-  }
-  return box;
-}
 
 /** 顶层、底层丝印上的文本。pcb_PrimitiveString 只给不挂在元件上的文本，元件位号不在里面。 */
 async function collectSilkscreenRows(): Promise<IPCB_PrimitiveString[]> {

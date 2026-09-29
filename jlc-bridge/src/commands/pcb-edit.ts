@@ -6,6 +6,7 @@
 // 试一遍是唯一能跨版本工作的做法。别「优化」成只试一种。
 
 import { edaApi, delay } from '../eda';
+import { primitiveBox } from './pcb-state';
 import {
   getPrimitiveId,
   makeRectPolygonSource,
@@ -51,9 +52,11 @@ export async function moveComponent(params: {
  *
  * 焊盘图元 IPCB_PrimitivePad 没有位号和父元件 ID，这里用 getAllPinsByPrimitiveId() 直接拿元件的焊盘，
  * 给的是完整图元 ID，不含封装自带的过孔。
- * 哪些走线连着焊盘交给 EDA 判断：getConnectedPrimitives() 走的是 EDA 的连接检查，
- * 走线铜皮和焊盘铜皮相交就算，端点不在焊盘中心也算（真机上通孔焊盘、大焊盘的走线端点常常离中心好几 mil）。
- * 过孔、填充区域不删；走线网络和焊盘不同的是压上去的别的线，也不删。
+ * 哪些走线连着焊盘先交给 EDA 判断：getConnectedPrimitives() 走的是 EDA 的连接检查，只看同一网络，
+ * 贴片焊盘只看同层、通孔焊盘各层都算，走线铜皮碰到焊盘铜皮就算，端点不在焊盘中心也算
+ * （真机上通孔焊盘、大焊盘的走线端点常常离中心好几 mil）。
+ * 其中只删端点落在焊盘上的直线和圆弧：只是从焊盘上穿过去的同网络走线两头还连着别处，删了会把那条连接断掉。
+ * 过孔、填充区域不删。
  */
 export async function relocateComponent(params: {
   designator: string;
@@ -79,8 +82,19 @@ export async function relocateComponent(params: {
   const lines = new Map<string, IPCB_PrimitiveLine>();
   const arcs = new Map<string, IPCB_PrimitiveArc>();
   for (const pin of pins) {
-    const net = pin.getState_Net() ?? '';
-    // false：接触到的图元全要（true 在文档里是「只要中心连接」）；填充区域和过孔下面按类型跳过
+    const padId = pin.getState_PrimitiveId();
+    const padBox = await primitiveBox('焊盘', padId);
+    // 端点离焊盘外框不到半个线宽，线头的圆帽就压在焊盘上
+    const endsOnPad = (t: IPCB_PrimitiveLine | IPCB_PrimitiveArc) => {
+      const margin = t.getState_LineWidth() / 2;
+      const inside = (x: number, y: number) =>
+        x >= padBox.minX - margin &&
+        x <= padBox.maxX + margin &&
+        y >= padBox.minY - margin &&
+        y <= padBox.maxY + margin;
+      return inside(t.getState_StartX(), t.getState_StartY()) || inside(t.getState_EndX(), t.getState_EndY());
+    };
+    // 类型包只公开了 false 这个重载；它比 true 只多给填充区域，下面按类型跳过
     const connected: Array<
       IPCB_PrimitiveLine | IPCB_PrimitiveArc | IPCB_PrimitiveVia | IPCB_PrimitivePolyline | IPCB_PrimitiveFill
     > = await pin.getConnectedPrimitives(false);
@@ -88,10 +102,10 @@ export async function relocateComponent(params: {
       const type: string = item.getState_PrimitiveType();
       if (type === 'Line') {
         const line = item as IPCB_PrimitiveLine;
-        if ((line.getState_Net() ?? '') === net) lines.set(line.getState_PrimitiveId(), line);
+        if (endsOnPad(line)) lines.set(line.getState_PrimitiveId(), line);
       } else if (type === 'Arc') {
         const arc = item as IPCB_PrimitiveArc;
-        if ((arc.getState_Net() ?? '') === net) arcs.set(arc.getState_PrimitiveId(), arc);
+        if (endsOnPad(arc)) arcs.set(arc.getState_PrimitiveId(), arc);
       }
     }
   }

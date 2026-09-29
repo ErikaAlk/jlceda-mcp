@@ -145,11 +145,13 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 扩展要从 `pcb_PrimitivePad.getAll()` 的焊盘里挑出这个元件的焊盘，读的是 `getState_Designator()`、`getState_ParentPrimitiveId()`、
 `getState_CenterX()` 这些方法，EDA 的焊盘图元 `IPCB_PrimitivePad` 一个都没有（对照 EDA 安装目录 `pro-api` 下的 `api-types.d.ts` 核实），
 所以一个焊盘都挑不出来。现在用 `pcb_PrimitiveComponent.getAllPinsByPrimitiveId()` 直接拿元件的焊盘，
-再用每个焊盘的 `getConnectedPrimitives()` 让 EDA 判断哪些图元连着它（EDA 的连接检查，铜皮相交就算）。
+再用每个焊盘的 `getConnectedPrimitives()` 让 EDA 判断哪些走线连着它。EDA 的连接检查只看同一网络，
+贴片焊盘只看同层、通孔焊盘各层都算，走线铜皮碰到焊盘铜皮就算。
 原来的写法只认端点落在焊盘中心 2 mil 以内的走线，可真机那块板上通孔焊盘、晶振焊盘、底层大焊盘的走线端点离中心 5 到几十 mil，照那个规则会漏删。
-删的是和焊盘同一网络的直线、圆弧走线；过孔、填充区域、压在焊盘上的别的网络的线都不删。
+EDA 认定连着的走线里，只删端点落在焊盘上（焊盘外框放宽半个线宽）的直线和圆弧；
+从焊盘上横穿过去的同网络走线两头还连着别处，不删；过孔、填充区域也不删。
 连着的走线里有锁定的，直接报错，一条都不删，元件也不动。
-走线先删、元件后移，移动这一步报错时走线已经删掉了。
+直线、圆弧分两次删，删完才移动元件；后面哪一步报错，前面已经删掉的走线不会恢复。
 `netsToReroute` 只列元件焊盘上的网络，不再混进封装自带过孔的网络。
 
 同一天核对了 `pcb_get_silkscreens` / `pcb_auto_silkscreen` 读的 getter：
