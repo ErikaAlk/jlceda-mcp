@@ -176,6 +176,11 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 （见 `silkscreen.ts` 的 `writeMove()`）。`done()` 发的是对象的全部字段，不先 `reset()` 就会拿取对象时的旧值覆盖画布。
 类型包里没有 `reset()` / `done()`，用到的声明照 EDA 安装目录的 `api-types.d.ts` 补在 `jlc-bridge/src/eda-beta.d.ts`。
 
+文本、属性的 `x`、`y` 是对齐锚点，只有居中对齐（`getState_AlignMode()` 为 5）时才在外框中心。
+`pcb.js` 的 TextModel 摆字时把字框按对齐方式放到锚点一侧，绕锚点转；底层上没勾镜像、顶层上勾了镜像的字
+再把相对锚点的 x 取反（`Lc()`），这种字绕锚点转的方向相反。坐标 y 轴向上，角度逆时针为正，
+`api.js` 只把坐标乘 10、把弧度换成度。自动避让的候选框按这套规则从真实外框推（见 `silkscreen.ts` 的 `candidateBox()`）。
+
 运行中的 EDA 加载的是哪一版 `pcb.js` / `api.js`，看 `assets/pro-versions/<版本>/editor.ini`。
 
 ---
@@ -183,7 +188,9 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 ## 常见任务
 
 **改了扩展**：`npm run build:ext` → 在 EDA 里重新导入 `.eext`（同 UUID 会覆盖）→
-`npm run live` 验证。菜单第一行的状态灯会自己变。
+点一次菜单「立即重连」→ `npm run live` 验证。菜单第一行的状态灯会自己变。
+`CODE_BUILD` 只取 `extension.json` 的版本号，版本号没变时 `link.ts` 认不出代码更新，
+已经连着的旧 `onMessage` 闭包会接着用旧代码处理命令；「立即重连」会关掉旧连接，用新代码重新注册。
 
 **改了 MCP server**：`npm run build` → **重启 Claude Code**（MCP 进程不会热重载）。
 
@@ -194,4 +201,4 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（59 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（63 项）。每条断言都对应一个踩过的坑，别随手删。

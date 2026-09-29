@@ -1040,7 +1040,7 @@ function pcbVia({ id, net, x, y, diameter }) {
 
 /**
  * IPCB_PrimitiveAttribute 的全部 getter 加写回用的方法。坐标单位 mil（api.js 里是画布坐标 × 10）。
- * record：{ id, parentId, key, value, keyVisible, valueVisible, x, y, rotation, layer }
+ * record：{ id, parentId, key, value, keyVisible, valueVisible, x, y, rotation, alignMode, mirror, layer }
  */
 function pcbAttribute(record, write) {
   return primitiveObject(
@@ -1059,11 +1059,11 @@ function pcbAttribute(record, write) {
       getState_FontFamily: () => 'default',
       getState_FontSize: () => 12,
       getState_LineWidth: () => 2,
-      getState_AlignMode: () => 5,
+      getState_AlignMode: () => f.alignMode,
       getState_Rotation: () => f.rotation,
       getState_Reverse: () => false,
       getState_Expansion: () => 0,
-      getState_Mirror: () => false,
+      getState_Mirror: () => f.mirror,
       getState_PrimitiveLock: () => false,
     }),
     write,
@@ -1092,7 +1092,7 @@ const SILK_ATTRIBUTES = [
 /**
  * withoutBox：让 getPrimitivesBBox 对这个图元给 undefined；nanBox：给一个带 NaN 的外框；
  * onlyCopperText：板上只有铜皮层上的那条文字；
- * attributes：元件挂着的属性（画布记录，缺的 keyVisible、rotation 按隐藏和 0° 补）；
+ * attributes：元件挂着的属性（画布记录，缺的 keyVisible、rotation、alignMode、mirror 按隐藏、0°、居中、不镜像补）；
  * rejectWrite：EDA 拒绝写回这个图元；
  * userEdit(canvas)：用户在 EDA 里改画布，第一次查焊盘时执行一次（这时丝印已经查完）
  */
@@ -1144,7 +1144,7 @@ function silkBoardMock({
   ];
   const canvas = {
     strings: onlyCopperText ? allStrings.slice(2) : allStrings,
-    attributes: attributes.map((spec) => ({ keyVisible: false, rotation: 0, ...spec })),
+    attributes: attributes.map((spec) => ({ keyVisible: false, rotation: 0, alignMode: 5, mirror: false, ...spec })),
   };
   const components = [
     pcbComponent({ id: 'c1', designator: 'R1', x: 440, y: 305, pads: [] }),
@@ -1416,6 +1416,281 @@ test('丝印层上的属性认不出所属元件、元件没有位号、显示�
     assert.match(reply.error, pattern);
     delete globalThis.__JLC_BRIDGE_HUB_V2__;
   }
+});
+
+// ─── 丝印自动避让：文字按对齐锚点摆 ───
+//
+// 文本、属性的 x/y 是对齐锚点，不是外框中心。pcb.js 的 TextModel 这样摆字（matrix 走 getMatrix4）：
+// w×h 的字框按对齐方式放到锚点一侧（偏移由 qE() 给出），绕锚点转 rotation，
+// 再由 Lc() 决定相对锚点的 x 要不要取反：底层（层 2、4、6、8、10、59）上没勾镜像、顶层上勾了镜像的字是翻转的。
+// 坐标 y 轴向上，角度逆时针为正，api.js 只把坐标乘 10、把弧度换成度。
+// 原来的自动避让拿锚点当中心画框、当成绕中心转：原位没压焊盘的会被挪走，挪完的位置在 EDA 里可能还压着焊盘。
+// 下面的模拟 EDA 照这套公式给外框，写回之后按新位置重新算，挪完再查一遍冲突。
+
+/** pcb.js 的 qE()：对齐方式 → 字框左下角相对锚点的偏移，单位是字框的宽、高 */
+const ALIGN_OFFSET = {
+  1: [0, -1], // LEFT_TOP
+  2: [0, -0.5], // LEFT_MIDDLE
+  3: [0, 0], // LEFT_BOTTOM
+  4: [-0.5, -1], // CENTER_TOP
+  5: [-0.5, -0.5], // CENTER
+  6: [-0.5, 0], // CENTER_BOTTOM
+  7: [-1, -1], // RIGHT_TOP
+  8: [-1, -0.5], // RIGHT_MIDDLE
+  9: [-1, 0], // RIGHT_BOTTOM
+};
+
+/** pcb.js 的 gs()：底层的层 ID */
+const BOTTOM_LAYERS = [2, 4, 6, 8, 10, 59];
+
+/** 照 pcb.js 的 TextModel.matrix 和 box 算文字外框，w、h 是字框宽高 */
+function edaTextBox({ x, y, alignMode, rotation = 0, layer, mirror = false, w, h }) {
+  const [fx, fy] = ALIGN_OFFSET[alignMode];
+  const flip = BOTTOM_LAYERS.includes(layer) !== mirror ? -1 : 1;
+  const cos = Math.cos((rotation * Math.PI) / 180);
+  const sin = Math.sin((rotation * Math.PI) / 180);
+  const corners = [
+    [0, 0],
+    [0, h],
+    [w, 0],
+    [w, h],
+  ].map(([px, py]) => {
+    const lx = px + fx * w;
+    const ly = py + fy * h;
+    return [x + flip * (lx * cos - ly * sin), y + lx * sin + ly * cos];
+  });
+  return {
+    minX: Math.min(...corners.map(([cx]) => cx)),
+    minY: Math.min(...corners.map(([, cy]) => cy)),
+    maxX: Math.max(...corners.map(([cx]) => cx)),
+    maxY: Math.max(...corners.map(([, cy]) => cy)),
+  };
+}
+
+/**
+ * 位号外框按 edaTextBox 现算的模拟 EDA。texts 是画布上各个位号的记录（w、h 是字框宽高，
+ * 缺的 rotation、mirror 按 0°、不镜像补），done() 写回的就是这些记录，之后再取外框就是新位置的。
+ */
+function anchorBoardMock({ texts, pads }) {
+  const canvas = texts.map((t) => ({
+    key: 'Designator',
+    keyVisible: false,
+    valueVisible: true,
+    rotation: 0,
+    mirror: false,
+    ...t,
+  }));
+  const components = canvas.map((r) =>
+    pcbComponent({ id: r.parentId, designator: r.value, x: r.x, y: r.y, pads: [] }),
+  );
+  const fixedBoxes = { outline: { minX: 0, minY: 0, maxX: 1000, maxY: 1000 } };
+  for (const p of pads) fixedBoxes[p.id] = p.box;
+  // EDA 收到的写回，记下坐标和角度
+  const writes = [];
+  const write = async (obj) => {
+    writes.push({
+      id: obj.getState_PrimitiveId(),
+      x: obj.getState_X(),
+      y: obj.getState_Y(),
+      rotation: obj.getState_Rotation(),
+    });
+  };
+  return {
+    writes,
+    api: {
+      pcb_Primitive: {
+        getPrimitivesBBox: async (items) => {
+          const boxes = { ...fixedBoxes };
+          for (const r of canvas) boxes[r.id] = edaTextBox(r);
+          return bboxLookup(boxes)(items);
+        },
+      },
+      pcb_PrimitiveString: { getAll: async () => [] },
+      pcb_PrimitiveAttribute: { getAll: async () => canvas.map((r) => pcbAttribute(r, write)) },
+      pcb_PrimitiveComponent: { getAll: async () => components },
+      pcb_PrimitivePad: {
+        getAll: async () =>
+          pads.map(({ id, net, box }) =>
+            pcbPad({
+              id,
+              padNumber: '1',
+              net,
+              x: (box.minX + box.maxX) / 2,
+              y: (box.minY + box.maxY) / 2,
+              pad: ['RECT', box.maxX - box.minX, box.maxY - box.minY, 0],
+            }),
+          ),
+      },
+      pcb_PrimitiveVia: { getAll: async () => [] },
+      // 板框：getBoardBoundingBox 按层 11 取线
+      pcb_PrimitiveLine: {
+        getAll: async (net, layer) =>
+          layer === 11 ? [pcbLine({ id: 'outline', net: '', from: [0, 0], to: [1000, 0] })] : [],
+      },
+    },
+  };
+}
+
+/** 挪完再按 EDA 的外框查一遍，一条冲突都不能有 */
+async function assertNoConflictsAfterAuto(runtime, state) {
+  const after = await runCommand(runtime, state, 'get_silkscreens', { includeConflicts: true });
+  assert.equal(after.ok, true, after.error);
+  for (const s of after.data.silkscreens) {
+    assert.deepEqual(
+      s.conflicts.map((c) => `${c.type}:${c.targetId}`),
+      [],
+      `${s.primitiveId} 挪到 (${s.x}, ${s.y}) 转 ${s.rotation}° 之后，按 EDA 的外框查还压着东西`,
+    );
+  }
+}
+
+test('位号的对齐锚点不在外框中心：自动避让的原位和候选位置都按 EDA 的真实外框算', { skip }, async () => {
+  const m = anchorBoardMock({
+    texts: [
+      // 左上对齐：外框在锚点右下方。以锚点为中心画的框会压到左边的 p1，真实外框没压
+      { id: 'a1', parentId: 'c1', value: 'U1', x: 300, y: 500, layer: 3, alignMode: 1, w: 40, h: 20 },
+      // 右上对齐：外框在锚点左下方，压着 p2
+      { id: 'a2', parentId: 'c2', value: 'U2', x: 600, y: 300, layer: 3, alignMode: 7, w: 40, h: 20 },
+    ],
+    pads: [
+      { id: 'p1', net: 'VCC', box: { minX: 270, minY: 495, maxX: 295, maxY: 520 } },
+      { id: 'p2', net: 'GND', box: { minX: 570, minY: 285, maxX: 590, maxY: 295 } },
+    ],
+  });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const before = await runCommand(runtime, state, 'get_silkscreens', { includeConflicts: true });
+  assert.equal(before.ok, true, before.error);
+  const byId = Object.fromEntries(before.data.silkscreens.map((s) => [s.primitiveId, s]));
+  assert.equal(byId.a1.x, 300, 'x/y 是对齐锚点');
+  assert.equal(byId.a1.y, 500, 'x/y 是对齐锚点');
+  assert.deepEqual(byId.a1.bbox, { minX: 300, minY: 480, maxX: 340, maxY: 500 }, '左上对齐的字在锚点右下方');
+  assert.deepEqual(byId.a1.conflicts, []);
+  assert.deepEqual(byId.a2.bbox, { minX: 560, minY: 280, maxX: 600, maxY: 300 }, '右上对齐的字在锚点左下方');
+  assert.deepEqual(byId.a2.conflicts.map((c) => c.targetId), ['p2']);
+
+  const auto = await runCommand(runtime, state, 'auto_silkscreen');
+  assert.equal(auto.ok, true, auto.error);
+  const details = Object.fromEntries(auto.data.details.map((d) => [d.primitiveId, d]));
+  assert.equal(details.a1.from.score, 0, '原位的分数按真实外框算，a1 没压任何东西');
+  assert.equal(details.a1.skipped, true);
+  assert.deepEqual(m.writes.map((w) => w.id), ['a2'], '原位没压东西的位号不许挪');
+  assert.deepEqual(details.a2.to, { x: 600, y: 300, rotation: 90, score: 0 }, '绕锚点转 90° 就让开了 p2');
+  await assertNoConflictsAfterAuto(runtime, state);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('位号换角度时外框绕锚点转，翻转的字（底层不勾镜像、顶层勾镜像）转的方向相反', { skip }, async () => {
+  // 两个位号都是左下对齐，原位各压着一个焊盘。不翻转的 a3 从锚点往右上长，翻转的 a4 往左上长。
+  // q2 堵在「转向算反」时 90° 会落到的地方，q3 堵住 180°，r2 堵在翻转的字 90° 真正落到的地方。
+  // 两轮：顶层不镜像 / 底层不镜像，底层勾镜像 / 顶层勾镜像，翻转与否只看层和镜像两者合起来
+  for (const [plain, flipped] of [
+    [{ layer: 3, mirror: false }, { layer: 4, mirror: false }],
+    [{ layer: 4, mirror: true }, { layer: 3, mirror: true }],
+  ]) {
+    const m = anchorBoardMock({
+      texts: [
+        { id: 'a3', parentId: 'c3', value: 'R3', x: 300, y: 300, ...plain, alignMode: 3, w: 40, h: 10 },
+        { id: 'a4', parentId: 'c4', value: 'R4', x: 700, y: 300, ...flipped, alignMode: 3, w: 40, h: 10 },
+      ],
+      pads: [
+        { id: 'q1', net: 'N1', box: { minX: 320, minY: 295, maxX: 330, maxY: 305 } },
+        { id: 'q2', net: 'N2', box: { minX: 302, minY: 270, maxX: 308, maxY: 290 } },
+        { id: 'q3', net: 'N3', box: { minX: 270, minY: 292, maxX: 290, maxY: 298 } },
+        { id: 'r1', net: 'N4', box: { minX: 670, minY: 295, maxX: 680, maxY: 305 } },
+        { id: 'r2', net: 'N5', box: { minX: 702, minY: 310, maxX: 708, maxY: 330 } },
+      ],
+    });
+    const { runtime, state } = boot({ extraApi: m.api });
+    await runtime.call('activate', 'onStartupFinished');
+    const label = `层 ${flipped.layer}、镜像 ${flipped.mirror}`;
+
+    const before = await runCommand(runtime, state, 'get_silkscreens', { includeConflicts: true });
+    assert.equal(before.ok, true, before.error);
+    const byId = Object.fromEntries(before.data.silkscreens.map((s) => [s.primitiveId, s]));
+    assert.deepEqual(byId.a3.bbox, { minX: 300, minY: 300, maxX: 340, maxY: 310 });
+    assert.deepEqual(byId.a3.conflicts.map((c) => c.targetId), ['q1']);
+    assert.equal(byId.a4.layer, flipped.layer);
+    assert.equal(byId.a4.mirror, flipped.mirror);
+    assert.deepEqual(byId.a4.bbox, { minX: 660, minY: 300, maxX: 700, maxY: 310 }, `${label}：翻转的字在锚点左边`);
+    assert.deepEqual(byId.a4.conflicts.map((c) => c.targetId), ['r1']);
+
+    const auto = await runCommand(runtime, state, 'auto_silkscreen');
+    assert.equal(auto.ok, true, auto.error);
+    const details = Object.fromEntries(auto.data.details.map((d) => [d.primitiveId, d]));
+    assert.deepEqual(details.a3.to, { x: 300, y: 300, rotation: 90, score: 0 }, `${label}：a3 转 90° 后字在锚点左上方`);
+    assert.deepEqual(
+      details.a4.to,
+      { x: 700, y: 300, rotation: 180, score: 0 },
+      `${label}：翻转的字转 90° 会压到 r2，要转 180°`,
+    );
+    await assertNoConflictsAfterAuto(runtime, state);
+    delete globalThis.__JLC_BRIDGE_HUB_V2__;
+  }
+});
+
+test('位号原角度不是 0 时按角度差转，原地四个角度都让不开时整体平移', { skip }, async () => {
+  // a5 左下对齐、原本转了 90°，字在锚点左上方 [290,300]×[300,340]，压着 u1。
+  // 原地转到 0°、180°、-90° 分别被 u2、u3、u4 堵住；锚点右移 12 mil 后 90° 仍被 u2 堵住，0° 让开了
+  const m = anchorBoardMock({
+    texts: [{ id: 'a5', parentId: 'c5', value: 'R5', x: 300, y: 300, layer: 3, rotation: 90, alignMode: 3, w: 40, h: 10 }],
+    pads: [
+      { id: 'u1', net: 'N1', box: { minX: 292, minY: 320, maxX: 298, maxY: 330 } },
+      { id: 'u2', net: 'N2', box: { minX: 301, minY: 302, maxX: 310, maxY: 308 } },
+      { id: 'u3', net: 'N3', box: { minX: 270, minY: 292, maxX: 280, maxY: 298 } },
+      { id: 'u4', net: 'N4', box: { minX: 302, minY: 270, maxX: 308, maxY: 280 } },
+    ],
+  });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const before = await runCommand(runtime, state, 'get_silkscreens', { includeConflicts: true });
+  assert.equal(before.ok, true, before.error);
+  const [a5] = before.data.silkscreens;
+  assert.equal(a5.rotation, 90);
+  assert.deepEqual(a5.bbox, { minX: 290, minY: 300, maxX: 300, maxY: 340 });
+  assert.deepEqual(a5.conflicts.map((c) => c.targetId), ['u1']);
+
+  const auto = await runCommand(runtime, state, 'auto_silkscreen');
+  assert.equal(auto.ok, true, auto.error);
+  assert.deepEqual(
+    auto.data.details[0].to,
+    { x: 312, y: 300, rotation: 0, score: 0 },
+    '转到 0° 要按角度差 -90° 转，平移时外框跟着锚点走',
+  );
+  await assertNoConflictsAfterAuto(runtime, state);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('先挪的位号按挪完的外框参与后面位号的避让', { skip }, async () => {
+  // b1 压着两个焊盘先挪，原地转 90° 到 [550,560]×[590,630]。
+  // b2 原地转到 -90° 会落到 [550,560]×[610,650]，压到 b1 的新位置，碰不到 b1 的旧位置；
+  // 转到 90°、180° 分别被 h1、h2 堵住，只能右移 12 mil 再转 -90°
+  const m = anchorBoardMock({
+    texts: [
+      { id: 'b1', parentId: 'c6', value: 'R6', x: 560, y: 590, layer: 3, alignMode: 3, w: 40, h: 10 },
+      { id: 'b2', parentId: 'c7', value: 'R7', x: 550, y: 650, layer: 3, alignMode: 3, w: 40, h: 10 },
+    ],
+    pads: [
+      { id: 'f1', net: 'N1', box: { minX: 570, minY: 592, maxX: 580, maxY: 598 } },
+      { id: 'f2', net: 'N2', box: { minX: 585, minY: 592, maxX: 595, maxY: 598 } },
+      { id: 'g1', net: 'N3', box: { minX: 560, minY: 652, maxX: 570, maxY: 658 } },
+      { id: 'h1', net: 'N4', box: { minX: 542, minY: 670, maxX: 548, maxY: 680 } },
+      { id: 'h2', net: 'N5', box: { minX: 520, minY: 642, maxX: 530, maxY: 648 } },
+    ],
+  });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const auto = await runCommand(runtime, state, 'auto_silkscreen');
+  assert.equal(auto.ok, true, auto.error);
+  const details = Object.fromEntries(auto.data.details.map((d) => [d.primitiveId, d]));
+  assert.deepEqual(m.writes.map((w) => w.id), ['b1', 'b2'], '压着两个焊盘的 b1 先挪');
+  assert.deepEqual(details.b1.to, { x: 560, y: 590, rotation: 90, score: 0 });
+  assert.deepEqual(details.b2.to, { x: 562, y: 650, rotation: -90, score: 0 }, 'b2 要让开 b1 挪完的位置');
+  await assertNoConflictsAfterAuto(runtime, state);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
 // ─── 原理图 ───

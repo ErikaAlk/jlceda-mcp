@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 59 项自动化测试
+npm test              # 63 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -140,6 +140,17 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 ## 更新记录
 
 ### 未发布
+
+**2026-09-29** `pcb_auto_silkscreen` 给候选位置打分时，把丝印的 `x`、`y` 当成外框中心画框，换角度时当成绕中心转。
+EDA 里文本和元件属性的坐标是对齐锚点（对齐方式有 9 种，只有居中对齐时锚点才在外框中心），字也是绕锚点转的，
+冲突检测用的却是 EDA 给的真实外框。锚点不在外框中心时，原位没压焊盘的丝印会被挪走，挪完的位置在 EDA 里可能还压着焊盘。
+现在原位的分数直接按真实外框算；候选位置平移时整个真实外框跟着平移，换角度时把外框四个角绕锚点转过角度差再取外接框。
+旋转方向对照 EDA 的 `pcb.js` 核实过：y 轴向上，角度逆时针为正；底层丝印上没勾镜像、顶层丝印上勾了镜像的字是左右翻转的，
+绕锚点转的方向和不翻转的字相反。原角度或角度差是 90° 的整数倍时，候选框和 EDA 的外框一致；
+两者都不是时候选框只会偏大，字越细长偏得越多（斜 45° 的 40×10 的字转到 0° 算成 50×50），这种丝印换角度的候选容易被判成冲突，多半只会平移。
+丝印条目多了 `mirror`（是否勾了镜像）。
+改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext`，再点一次菜单「JLC MCP → 立即重连」才生效：
+扩展版本号没变，已经连着的旧连接认不出代码更新，会接着用旧代码处理命令。
 
 **2026-09-29** `pcb_get_silkscreens` 查不出元件位号，`pcb_auto_silkscreen` 因此从来没挪过位号。
 扩展只读 `pcb_PrimitiveString.getAll()`，EDA 的 `pcb.js` 在这个接口里按 `!getParent()` 过滤，只给不挂在元件上的文本；
