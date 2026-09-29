@@ -826,20 +826,34 @@ test('搬迁元件时删掉连到它焊盘上的走线，别的走线不动', { 
 // 元件位号、值这些挂在元件上的文字是属性图元 IPCB_PrimitiveAttribute。pcb_PrimitiveString.getAll() 不给它们
 // （pcb.js 里按 !getParent() 过滤了），原来只读文本，真机上一块摆满元件的板查出来 0 条丝印，位号从来没被挪过。
 //
-// 写回也照 api.js 造：getAll 给的对象处在异步模式，setState_* 只改对象上的值，done() 才把整个对象发给 EDA，
-// EDA 拒绝时 done() 抛「对象参数不正确，无法应用到画布」。pcb_PrimitiveString.modify / pcb_PrimitiveAttribute.modify
-// 调 done() 时没有 await，EDA 拒绝写入也照样返回对象。
+// 写回也照 api.js 造：getAll 每次都照画布现状造一批新对象，对象处在异步模式；
+// setState_* 只改对象上的值（同步模式下会顺手调 done()，不 await），reset() 从画布重新读一遍，
+// done() 才把对象的全部字段发给 EDA，EDA 拒绝时抛「对象参数不正确，无法应用到画布」。
+// pcb_PrimitiveString.modify / pcb_PrimitiveAttribute.modify 调 done() 时没有 await，EDA 拒绝写入也照样返回对象。
 
-/** 给图元对象装上写回用的方法（都是 api-types.d.ts 里有的），write(obj) 由板子的 mock 提供 */
-function writable(obj, state, write) {
-  return Object.assign(obj, {
-    setState_X: (x) => ((state.x = x), obj),
-    setState_Y: (y) => ((state.y = y), obj),
-    setState_Rotation: (rotation) => ((state.rotation = rotation), obj),
-    isAsync: () => state.async,
-    toAsync: () => ((state.async = true), obj),
+/**
+ * 照画布上的一条记录造图元对象，方法都是 api-types.d.ts 里有的。
+ * fields 是记录的一份拷贝，getter 读它；reset() 从画布重新拷一份，done() 交给 write() 后把整份拷贝写回画布。
+ */
+function primitiveObject(record, getters, write) {
+  const fields = { ...record };
+  let async = true;
+  const obj = {};
+  const set = (key) => (value) => {
+    fields[key] = value;
+    if (!async) obj.done();
+    return obj;
+  };
+  return Object.assign(obj, getters(fields), {
+    setState_X: set('x'),
+    setState_Y: set('y'),
+    setState_Rotation: set('rotation'),
+    isAsync: () => async,
+    toAsync: () => ((async = true), obj),
+    reset: async () => (Object.assign(fields, record), obj),
     done: async () => {
       await write(obj);
+      Object.assign(record, fields);
       return obj;
     },
   });
@@ -855,27 +869,27 @@ function edaModify(row, property) {
   return row;
 }
 
-function pcbString({ id, text, x, y, layer, write }) {
-  const state = { x, y, rotation: 0, async: true };
-  return writable(
-    {
+/** IPCB_PrimitiveString。record：{ id, text, x, y, rotation, layer } */
+function pcbString(record, write) {
+  return primitiveObject(
+    record,
+    (f) => ({
       getState_PrimitiveType: () => 'String',
-      getState_PrimitiveId: () => id,
-      getState_Layer: () => layer,
-      getState_X: () => state.x,
-      getState_Y: () => state.y,
-      getState_Text: () => text,
+      getState_PrimitiveId: () => f.id,
+      getState_Layer: () => f.layer,
+      getState_X: () => f.x,
+      getState_Y: () => f.y,
+      getState_Text: () => f.text,
       getState_FontFamily: () => 'default',
       getState_FontSize: () => 16,
       getState_LineWidth: () => 2,
       getState_AlignMode: () => 5,
-      getState_Rotation: () => state.rotation,
+      getState_Rotation: () => f.rotation,
       getState_Reverse: () => false,
       getState_Expansion: () => 0,
       getState_Mirror: () => false,
       getState_PrimitiveLock: () => false,
-    },
-    state,
+    }),
     write,
   );
 }
@@ -896,32 +910,34 @@ function pcbVia({ id, net, x, y, diameter }) {
   };
 }
 
-/** IPCB_PrimitiveAttribute 的全部 getter 加写回用的方法。坐标单位 mil（api.js 里是画布坐标 × 10） */
-function pcbAttribute({ id, parentId, key, value, keyVisible = false, valueVisible, x, y, layer, write }) {
-  const state = { x, y, rotation: 0, async: true };
-  return writable(
-    {
+/**
+ * IPCB_PrimitiveAttribute 的全部 getter 加写回用的方法。坐标单位 mil（api.js 里是画布坐标 × 10）。
+ * record：{ id, parentId, key, value, keyVisible, valueVisible, x, y, rotation, layer }
+ */
+function pcbAttribute(record, write) {
+  return primitiveObject(
+    record,
+    (f) => ({
       getState_PrimitiveType: () => 'Attribute',
-      getState_PrimitiveId: () => id,
-      getState_ParentPrimitiveId: () => parentId,
-      getState_Layer: () => layer,
-      getState_X: () => state.x,
-      getState_Y: () => state.y,
-      getState_Key: () => key,
-      getState_Value: () => value,
-      getState_KeyVisible: () => keyVisible,
-      getState_ValueVisible: () => valueVisible,
+      getState_PrimitiveId: () => f.id,
+      getState_ParentPrimitiveId: () => f.parentId,
+      getState_Layer: () => f.layer,
+      getState_X: () => f.x,
+      getState_Y: () => f.y,
+      getState_Key: () => f.key,
+      getState_Value: () => f.value,
+      getState_KeyVisible: () => f.keyVisible,
+      getState_ValueVisible: () => f.valueVisible,
       getState_FontFamily: () => 'default',
       getState_FontSize: () => 12,
       getState_LineWidth: () => 2,
       getState_AlignMode: () => 5,
-      getState_Rotation: () => state.rotation,
+      getState_Rotation: () => f.rotation,
       getState_Reverse: () => false,
       getState_Expansion: () => 0,
       getState_Mirror: () => false,
       getState_PrimitiveLock: () => false,
-    },
-    state,
+    }),
     write,
   );
 }
@@ -935,8 +951,8 @@ const SILK_ATTRIBUTES = [
   { id: 'a1', parentId: 'c1', key: 'Designator', value: 'R1', valueVisible: true, x: 440, y: 290, layer: 3 },
   { id: 'a2', parentId: 'c1', key: 'Value', value: '10k', valueVisible: false, x: 0, y: 0, layer: 3 },
   { id: 'a3', parentId: 'c1', key: 'Footprint', value: 'R0603', valueVisible: false, x: 0, y: 0, layer: 3 },
-  // C1 的位号在底层丝印，周围空着
-  { id: 'a4', parentId: 'c2', key: 'Designator', value: 'C1', valueVisible: true, x: 700, y: 700, layer: 4 },
+  // C1 的位号在底层丝印，周围空着，转了 180°
+  { id: 'a4', parentId: 'c2', key: 'Designator', value: 'C1', valueVisible: true, x: 700, y: 700, rotation: 180, layer: 4 },
   // 显示着，但在顶层装配层（9），不是丝印
   { id: 'a5', parentId: 'c2', key: 'Value', value: '100nF', valueVisible: true, x: 700, y: 720, layer: 9 },
   // 勾了显示但值是空的，画布上一个字都没有
@@ -947,9 +963,11 @@ const SILK_ATTRIBUTES = [
 
 /**
  * withoutBox：让 getPrimitivesBBox 对这个图元给 undefined；
- * attributes：元件挂着的属性（pcbAttribute 的参数）；rejectWrite：EDA 拒绝写回这个图元
+ * attributes：元件挂着的属性（画布记录，缺的 keyVisible、rotation 按隐藏和 0° 补）；
+ * rejectWrite：EDA 拒绝写回这个图元；
+ * userEdit(canvas)：用户在 EDA 里改画布，第一次查焊盘时执行一次（这时丝印已经查完）
  */
-function silkBoardMock({ withoutBox, attributes = [], rejectWrite } = {}) {
+function silkBoardMock({ withoutBox, attributes = [], rejectWrite, userEdit } = {}) {
   const boxes = {
     outline: { minX: 0, minY: 0, maxX: 1000, maxY: 1000 },
     // 80×50 的大焊盘，中心 (440, 305)
@@ -980,53 +998,63 @@ function silkBoardMock({ withoutBox, attributes = [], rejectWrite } = {}) {
     });
   };
 
-  const strings = [
-    pcbString({ id: 's1', text: 'R1', x: 474, y: 334, layer: 3, write }),
-    pcbString({ id: 's2', text: 'GND', x: 200, y: 215, layer: 4, write }),
-    // 顶层铜皮上的文字，不是丝印
-    pcbString({ id: 's3', text: 'NOTE', x: 440, y: 305, layer: 1, write }),
-  ];
-  const attributeRows = attributes.map((spec) => pcbAttribute({ ...spec, write }));
+  // 画布：每个图元一条记录。getAll 每次都照它造新对象，done() 把对象写回它
+  const canvas = {
+    strings: [
+      { id: 's1', text: 'R1', x: 474, y: 334, rotation: 0, layer: 3 },
+      { id: 's2', text: 'GND', x: 200, y: 215, rotation: 0, layer: 4 },
+      // 顶层铜皮上的文字，不是丝印
+      { id: 's3', text: 'NOTE', x: 440, y: 305, rotation: 0, layer: 1 },
+    ],
+    attributes: attributes.map((spec) => ({ keyVisible: false, rotation: 0, ...spec })),
+  };
   const components = [
     pcbComponent({ id: 'c1', designator: 'R1', x: 440, y: 305, pads: [] }),
     pcbComponent({ id: 'c2', designator: 'C1', x: 700, y: 720, pads: [] }),
     // 没有位号的元件
     pcbComponent({ id: 'c3', designator: undefined, x: 50, y: 50, pads: [] }),
   ];
+  let pendingEdit = userEdit;
   return {
     writes,
+    canvas,
     api: {
       pcb_Primitive: { getPrimitivesBBox: bboxLookup(boxes) },
       pcb_PrimitiveString: {
-        getAll: async (layer) => strings.filter((s) => layer === undefined || s.getState_Layer() === layer),
+        getAll: async (layer) =>
+          canvas.strings.filter((r) => layer === undefined || r.layer === layer).map((r) => pcbString(r, write)),
         modify: async (id, property) => {
-          const row = strings.find((s) => s.getState_PrimitiveId() === id);
+          const record = canvas.strings.find((r) => r.id === id);
           // api.js 按 ID 取不到文本时返回 undefined
-          if (!row) return undefined;
-          return edaModify(row, property);
+          if (!record) return undefined;
+          return edaModify(pcbString(record, write), property);
         },
       },
       pcb_PrimitiveAttribute: {
         // 照 api.js：摊平全部元件的属性，再按父图元、层、锁定过滤
         getAll: async (parentPrimitiveId, layer, primitiveLock) =>
-          attributeRows.filter(
-            (a) =>
-              (parentPrimitiveId === undefined || a.getState_ParentPrimitiveId() === parentPrimitiveId) &&
-              (layer === undefined || a.getState_Layer() === layer) &&
-              (primitiveLock === undefined || a.getState_PrimitiveLock() === primitiveLock),
-          ),
+          canvas.attributes
+            .map((r) => pcbAttribute(r, write))
+            .filter(
+              (a) =>
+                (parentPrimitiveId === undefined || a.getState_ParentPrimitiveId() === parentPrimitiveId) &&
+                (layer === undefined || a.getState_Layer() === layer) &&
+                (primitiveLock === undefined || a.getState_PrimitiveLock() === primitiveLock),
+            ),
         modify: async (id, property) => {
-          const row = attributeRows.find((a) => a.getState_PrimitiveId() === id);
+          const record = canvas.attributes.find((r) => r.id === id);
           // api.js 按 ID 取不到属性时拿到的是空数组，接着调 isAsync() 就抛了
-          if (!row) throw new TypeError('t.isAsync is not a function');
-          return edaModify(row, property);
+          if (!record) throw new TypeError('t.isAsync is not a function');
+          return edaModify(pcbAttribute(record, write), property);
         },
       },
       pcb_PrimitiveComponent: { getAll: async () => components },
       pcb_PrimitivePad: {
-        getAll: async () => [
-          pcbPad({ id: 'pad1', padNumber: '1', net: '$1N16', x: 440, y: 305, pad: ['RECT', 80, 50, 0] }),
-        ],
+        getAll: async () => {
+          pendingEdit?.(canvas);
+          pendingEdit = undefined;
+          return [pcbPad({ id: 'pad1', padNumber: '1', net: '$1N16', x: 440, y: 305, pad: ['RECT', 80, 50, 0] })];
+        },
       },
       pcb_PrimitiveVia: {
         getAll: async () => [pcbVia({ id: 'via1', net: 'GND', x: 200, y: 200, diameter: 24 })],
@@ -1153,10 +1181,14 @@ test('pcb_move_silkscreen 按 primitiveId 分辨属性和文本，写回对应�
   assert.equal(attr.data.kind, 'attribute');
   assert.deepEqual(m.writes, [{ id: 'a1', type: 'Attribute', x: 440, y: 250, rotation: 90 }]);
 
+  const keep = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 'a4', x: 720, y: 700 });
+  assert.equal(keep.ok, true, keep.error);
+  assert.deepEqual(m.writes[1], { id: 'a4', type: 'Attribute', x: 720, y: 700, rotation: 180 }, '没传角度就不动角度');
+
   const str = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 's1', x: 500, y: 400 });
   assert.equal(str.ok, true, str.error);
   assert.equal(str.data.kind, 'string');
-  assert.deepEqual(m.writes[1], { id: 's1', type: 'String', x: 500, y: 400, rotation: 0 }, '没传角度就不动角度');
+  assert.deepEqual(m.writes[2], { id: 's1', type: 'String', x: 500, y: 400, rotation: 0 });
 
   const missing = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 'nope', x: 0, y: 0 });
   assert.equal(missing.ok, false, '找不到的图元不许报成功');
@@ -1192,6 +1224,28 @@ test('EDA 拒绝写回丝印时，挪动和自动避让都要报错，不许报�
     assert.match(reply.error, /无法应用到画布/);
     delete globalThis.__JLC_BRIDGE_HUB_V2__;
   }
+});
+
+test('自动避让写回前重新读画布，不把用户刚改的位号写回旧值', { skip }, async () => {
+  // done() 发的是对象的全部字段。自动避让先查丝印，再查冲突、取外框、逐个打分，最后才写回；
+  // 用查询时的旧对象写回，会把用户在这段时间里改过的位号（R1 → R9）写回 R1。
+  const m = silkBoardMock({
+    attributes: SILK_ATTRIBUTES,
+    userEdit: (canvas) => {
+      canvas.attributes.find((r) => r.id === 'a1').value = 'R9';
+    },
+  });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const auto = await runCommand(runtime, state, 'auto_silkscreen');
+  assert.equal(auto.ok, true, auto.error);
+  assert.ok(
+    m.writes.some((w) => w.id === 'a1'),
+    'a1 压着焊盘，应该被挪过',
+  );
+  assert.equal(m.canvas.attributes.find((r) => r.id === 'a1').value, 'R9', '用户改过的位号被旧对象写回去了');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
 test('丝印层上的属性认不出所属元件、元件没有位号、显示着却没有坐标时直接报错', { skip }, async () => {

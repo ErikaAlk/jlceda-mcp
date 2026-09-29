@@ -165,10 +165,11 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 所以只收丝印层（3、4）上显示出字的属性，判断条件照 `pcb.js` 的 `modifyAttrPosition`（见 `silkscreen.ts`）。
 `pcb_PrimitiveAttribute.get(单个 ID)` 查不到时返回空数组（类型声明写的是 `undefined`），按 ID 分辨文本和属性要到两个 `getAll()` 里找。
 
-`api.js` 里各图元类的 `modify()`（文本、属性、元件等 15 处）调 `done()` 时没有 await：
+`api.js` 里 14 个 PCB 图元类（文本、属性、元件、导线、过孔等）的 `modify()` 调 `done()` 时没有 await：
 EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画布」没人接，`modify()` 照样返回图元对象。
-要让写入失败报出来，取到图元对象、`setState_*` 之后 await 它的 `done()`（见 `silkscreen.ts` 的 `writeMove()`）。
-类型包把 `done()` 当作 @beta 成员裁掉了，用到的声明补在 `jlc-bridge/src/eda-beta.d.ts`。
+要让写入失败报出来，取到图元对象后先 `reset()` 读回画布现状，`setState_*` 之后 await 它的 `done()`
+（见 `silkscreen.ts` 的 `writeMove()`）。`done()` 发的是对象的全部字段，不先 `reset()` 就会拿取对象时的旧值覆盖画布。
+类型包里没有 `reset()` / `done()`，用到的声明照 EDA 安装目录的 `api-types.d.ts` 补在 `jlc-bridge/src/eda-beta.d.ts`。
 
 运行中的 EDA 加载的是哪一版 `pcb.js` / `api.js`，看 `assets/pro-versions/<版本>/editor.ini`。
 
@@ -188,4 +189,4 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（54 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（55 项）。每条断言都对应一个踩过的坑，别随手删。

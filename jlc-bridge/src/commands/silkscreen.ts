@@ -302,10 +302,13 @@ export async function getSilkscreens(params?: SilkQuery): Promise<any> {
  * 不调 pcb_PrimitiveString.modify / pcb_PrimitiveAttribute.modify：api.js 里这两个方法调 done() 时没有 await，
  * EDA 拒绝写入时 done() 抛的「对象参数不正确，无法应用到画布」没人接，调用方照样拿到成功。
  * 这里改完坐标直接 await 图元对象的 done()，发的是同一个 modify 请求，写入失败会抛到调用方。
+ * done() 发的是对象的全部字段，所以写之前先 reset() 读回画布现状，免得拿查询时的旧值
+ * 盖掉用户这段时间里改过的内容（比如位号）；图元已经被删掉时 reset() 直接抛错。
  */
 async function writeMove(row: IPCB_PrimitiveString | IPCB_PrimitiveAttribute, move: SilkMove): Promise<void> {
   // getAll 给的对象本来就是异步模式；同步模式下 setState_* 会自己调 done()，同样不 await
   row.toAsync();
+  await row.reset();
   row.setState_X(move.x);
   row.setState_Y(move.y);
   if (move.rotation !== undefined) row.setState_Rotation(move.rotation);
@@ -340,6 +343,9 @@ export async function moveSilkscreen(params: {
   if (!params?.primitiveId) throw new Error('需要 primitiveId');
   if (!Number.isFinite(Number(params?.x)) || !Number.isFinite(Number(params?.y))) {
     throw new Error('x/y 必须是数字');
+  }
+  if (params.rotation !== undefined && !Number.isFinite(Number(params.rotation))) {
+    throw new Error('rotation 必须是数字');
   }
 
   const primitiveId = String(params.primitiveId);
