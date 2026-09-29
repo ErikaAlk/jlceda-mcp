@@ -146,6 +146,18 @@ EDA 不给 console。三条路：
 2. `npm test` 的 `tests/extension.test.mjs`——把真实产物装进复刻的沙箱跑，能打断点
 3. `npm run live`——对着真 EDA 跑完整链路
 
+### 图元 getter 以 `api-types.d.ts` 为准，焊盘 ID 是「元件 ID + 后缀」
+
+EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清了每个图元类有哪些 `getState_*`，
+读之前先对一遍。按猜的方法名读不会报错，只会静默拿到空值：线宽、元件宽高、焊盘位号都栽在这上面。
+图元对象标成类型包里的 `IPCB_*` 类型（见 `pcb-state.ts` 的焊盘部分），不存在的 getter 过不了类型检查。
+
+焊盘图元没有位号和父元件 ID，只能拿元件的 `getState_Pads()` 反查。那里的 `primitiveId` 是去掉元件 ID 的后缀
+（`pro-pcb/<版本>/js/pcb.js` 序列化元件时写的是 `pad.globalIndex.replace(component.globalIndex, '')`），
+焊盘的完整 ID 要拼成「元件 ID + 后缀」，列表里还混着封装自带的过孔。实现见 `mapPadOwners()`。
+
+运行中的 EDA 加载的是哪一版 `pcb.js` / `api.js`，看 `assets/pro-versions/<版本>/editor.ini`。
+
 ---
 
 ## 常见任务
@@ -162,4 +174,4 @@ EDA 不给 console。三条路：
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（44 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（46 项）。每条断言都对应一个踩过的坑，别随手删。

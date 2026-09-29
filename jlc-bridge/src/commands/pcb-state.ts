@@ -6,8 +6,6 @@ import {
   encodeBase64FromArrayBuffer,
   firstBox,
   normalizeNetArray,
-  readFirstBooleanValue,
-  readFirstNumberValue,
   readFirstStringValue,
   toFinite,
   type Box,
@@ -176,12 +174,97 @@ export async function getSelectedPrimitiveIdSet(): Promise<Set<string>> {
   return result;
 }
 
+type PadOwner = { primitiveId: string; designator: string };
+
+/**
+ * 焊盘图元 ID → 所属元件。
+ *
+ * 焊盘图元 IPCB_PrimitivePad 没有位号、也没有父元件 ID 的 getter，只能从元件那头反查：
+ * 元件的 getState_Pads() 列出它名下的焊盘，但那里的 primitiveId 只是后缀。
+ * EDA 的 pcb.js 序列化元件时写的是 pad.globalIndex.replace(component.globalIndex, '')，
+ * 焊盘的完整图元 ID 是「元件 ID + 后缀」（真机上 39 个焊盘全是这样）。
+ * 这个列表里还混着封装自带的过孔，拼出来不在 padIds 里的就是它们。
+ */
+async function mapPadOwners(padIds: Set<string>): Promise<Map<string, PadOwner>> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveComponent?.getAll) {
+    throw new Error('这版 嘉立创EDA 不支持元件查询，查不出焊盘属于哪个元件');
+  }
+
+  const rows: IPCB_PrimitiveComponent[] = await api.pcb_PrimitiveComponent.getAll();
+  const owners = new Map<string, PadOwner>();
+  let listed = 0;
+  for (const row of rows) {
+    const primitiveId = row.getState_PrimitiveId();
+    const designator = row.getState_Designator() || '';
+    for (const ref of row.getState_Pads() || []) {
+      listed++;
+      const padId = primitiveId + ref.primitiveId;
+      if (padIds.has(padId)) owners.set(padId, { primitiveId, designator });
+    }
+  }
+  if (listed > 0 && owners.size === 0) {
+    throw new Error(
+      `元件的 getState_Pads() 一共列了 ${listed} 项，按「元件 ID + 焊盘 ID」拼出来一个焊盘都对不上，EDA 的焊盘 ID 规则可能变了`,
+    );
+  }
+  return owners;
+}
+
+/** getState_Pad() 的外形数组摊成字段，尺寸单位 mil */
+function padShapeFields(primitiveId: string, pad: any[] | undefined): Record<string, unknown> {
+  if (!pad) throw new Error(`焊盘 ${primitiveId} 读不出外形，getState_Pad() 返回 undefined`);
+  const [shape] = pad;
+  switch (shape) {
+    case 'ELLIPSE':
+    case 'OVAL':
+      return { shape, width: pad[1], height: pad[2] };
+    case 'RECT':
+      // 第 4 项是 EDA 属性面板里的「Corner Radius Ratio」，百分数，不是 mil
+      return { shape, width: pad[1], height: pad[2], cornerRadiusRatio: pad[3] };
+    case 'NGON':
+      return { shape, diameter: pad[1], sides: pad[2] };
+    case 'POLYGON':
+      return { shape, polygon: pad[1] };
+  }
+  throw new Error(`焊盘 ${primitiveId} 的外形认不出：${JSON.stringify(pad)}`);
+}
+
+/** getState_Hole()：null 表示没有孔（贴片焊盘），尺寸单位 mil */
+function padHole(primitiveId: string, hole: any[] | null): Record<string, unknown> | null {
+  if (hole === null) return null;
+  const [shape] = hole;
+  if (shape === 'ROUND') return { shape, diameter: hole[1] };
+  if (shape === 'SLOT') return { shape, diameter: hole[1], length: hole[2] };
+  throw new Error(`焊盘 ${primitiveId} 的孔认不出：${JSON.stringify(hole)}`);
+}
+
+function readPad(row: IPCB_PrimitivePad, owners: Map<string, PadOwner>): any {
+  const primitiveId = row.getState_PrimitiveId();
+  const owner = owners.get(primitiveId);
+  return {
+    primitiveId,
+    padNumber: row.getState_PadNumber(),
+    designator: owner?.designator ?? '',
+    parentPrimitiveId: owner?.primitiveId ?? '',
+    net: row.getState_Net() || '',
+    x: row.getState_X(),
+    y: row.getState_Y(),
+    rotation: row.getState_Rotation(),
+    layer: row.getState_Layer(),
+    locked: row.getState_PrimitiveLock(),
+    ...padShapeFields(primitiveId, row.getState_Pad()),
+    hole: padHole(primitiveId, row.getState_Hole()),
+  };
+}
+
 /**
  * 查焊盘。
  *
- * 支持两种过滤：nets（网络名，逗号分隔或数组）和 designator（位号）。
+ * 支持两种过滤：nets（网络名，逗号分隔或数组）和 designator（位号，不分大小写）。
  * designator 这条是补的 —— MCP 那边的 pcb_get_pads 一直传的是 designator，
  * 而这边只认 nets，于是这个参数被静默丢掉，查谁都返回全部焊盘。
+ * 位号和所属元件由 mapPadOwners() 从元件那头反查。
  */
 export async function getPads(params?: {
   nets?: string[] | string;
@@ -192,7 +275,8 @@ export async function getPads(params?: {
   const api = edaApi();
   if (!api?.pcb_PrimitivePad?.getAll) throw new Error('这版 嘉立创EDA 不支持焊盘查询');
 
-  const rows = await api.pcb_PrimitivePad.getAll();
+  const rows: IPCB_PrimitivePad[] = await api.pcb_PrimitivePad.getAll();
+  const owners = await mapPadOwners(new Set(rows.map((row) => row.getState_PrimitiveId())));
   const limitRaw = Number(params?.limit);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 10000;
   const includeBBox = Boolean(params?.includeBBox);
@@ -208,42 +292,10 @@ export async function getPads(params?: {
   const designatorFilter = String(params?.designator || '').trim().toUpperCase();
 
   const pads: any[] = [];
-  for (const row of rows || []) {
-    const primitiveId = readFirstStringValue(row, ['getState_PrimitiveId']);
-    if (!primitiveId) continue;
-
-    const net = readFirstStringValue(row, ['getState_Net', 'getState_NetName']);
-    if (netFilter.size > 0 && (!net || !netFilter.has(net.toUpperCase()))) continue;
-
-    const designator = readFirstStringValue(row, ['getState_Designator']);
-    if (designatorFilter && designator.toUpperCase() !== designatorFilter) continue;
-
-    const x = readFirstNumberValue(row, ['getState_X', 'getState_CenterX', 'getState_PosX']);
-    const y = readFirstNumberValue(row, ['getState_Y', 'getState_CenterY', 'getState_PosY']);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-
-    const layerRaw = readFirstNumberValue(row, ['getState_Layer']);
-
-    const pad: any = {
-      primitiveId,
-      net: net || '',
-      x,
-      y,
-      layer:
-        layerRaw !== undefined
-          ? Number(layerRaw)
-          : String(readFirstStringValue(row, ['getState_Layer']) || ''),
-      parentPrimitiveId: readFirstStringValue(row, [
-        'getState_ParentPrimitiveId',
-        'getState_BelongPrimitiveId',
-        'getState_ComponentPrimitiveId',
-      ]),
-      designator,
-      locked: Boolean(readFirstBooleanValue(row, ['getState_PrimitiveLock'])),
-      holeDiameter: readFirstNumberValue(row, ['getState_HoleDiameter', 'getState_DrillDiameter']),
-      diameter: readFirstNumberValue(row, ['getState_Diameter', 'getState_PadDiameter']),
-      shape: readFirstStringValue(row, ['getState_Shape', 'getState_PadShape']),
-    };
+  for (const row of rows) {
+    const pad = readPad(row, owners);
+    if (netFilter.size > 0 && !netFilter.has(pad.net.toUpperCase())) continue;
+    if (designatorFilter && pad.designator.toUpperCase() !== designatorFilter) continue;
 
     if (includeBBox) {
       const bbox = await getBBoxOfPrimitive(row);
@@ -262,7 +314,7 @@ export async function getPads(params?: {
   }
 
   return {
-    totalPads: Array.isArray(rows) ? rows.length : 0,
+    totalPads: rows.length,
     returnedPads: pads.length,
     nets: Array.from(netStats.entries())
       .map(([name, padCount]) => ({ name, padCount }))
@@ -339,22 +391,19 @@ export async function getNetPrimitives(params: { net: string }): Promise<any> {
   }
 
   if (api?.pcb_PrimitivePad?.getAll) {
-    try {
-      const rows = await api.pcb_PrimitivePad.getAll();
-      for (const r of Array.isArray(rows) ? rows : []) {
-        const padNet = r?.getState_Net?.() || r?.getState_NetName?.() || '';
-        if (padNet !== net) continue;
-        const id = r?.getState_PrimitiveId?.();
-        if (!id) continue;
-        result.pads.push({
-          primitiveId: id,
-          x: Number(r?.getState_X?.() ?? r?.getState_CenterX?.() ?? 0),
-          y: Number(r?.getState_Y?.() ?? r?.getState_CenterY?.() ?? 0),
-          designator: r?.getState_Designator?.() || '',
-        });
-      }
-    } catch {
-      /* ignore */
+    const rows: IPCB_PrimitivePad[] = await api.pcb_PrimitivePad.getAll();
+    // 反查要拿全板的焊盘，只拿这个网络的会让 mapPadOwners 的「一个都对不上」误报
+    const owners = await mapPadOwners(new Set(rows.map((r) => r.getState_PrimitiveId())));
+    for (const r of rows) {
+      if ((r.getState_Net() || '') !== net) continue;
+      const primitiveId = r.getState_PrimitiveId();
+      result.pads.push({
+        primitiveId,
+        x: r.getState_X(),
+        y: r.getState_Y(),
+        designator: owners.get(primitiveId)?.designator ?? '',
+        padNumber: r.getState_PadNumber(),
+      });
     }
   }
 
