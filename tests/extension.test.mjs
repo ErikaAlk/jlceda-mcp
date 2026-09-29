@@ -516,29 +516,40 @@ function pcbPad({ id, padNumber, net, x, y, layer = 1, pad, hole = null }) {
   };
 }
 
-function pcbComponent({ id, designator, x, y, pads }) {
-  return {
-    getState_PrimitiveType: () => 'Component',
-    getState_PrimitiveId: () => id,
-    getState_Component: () => ({ libraryUuid: 'lib1', uuid: 'dev1' }),
-    getState_Footprint: () => ({ libraryUuid: 'lib1', uuid: 'fp1' }),
-    getState_Layer: () => 1,
-    getState_X: () => x,
-    getState_Y: () => y,
-    getState_Rotation: () => 0,
-    getState_PrimitiveLock: () => false,
-    getState_AddIntoBom: () => true,
-    getState_Model3D: () => undefined,
-    getState_Designator: () => designator,
-    getState_Pads: () => pads,
-    getState_Name: () => designator,
-    getState_UniqueId: () => undefined,
-    getState_Manufacturer: () => undefined,
-    getState_ManufacturerId: () => undefined,
-    getState_Supplier: () => undefined,
-    getState_SupplierId: () => undefined,
-    getState_OtherProperty: () => ({}),
-  };
+/**
+ * IPCB_PrimitiveComponent 的全部 getter 加写回用的方法（见 primitiveObject）。
+ * record 是画布上的一条记录：{ id, designator, x, y, pads, rotation, locked }，缺的 rotation、locked 按 0° 和未锁定补进记录。
+ * write 是 done() 发给 EDA 的请求，只读的夹具不传。
+ */
+function pcbComponent(record, write) {
+  record.rotation ??= 0;
+  record.locked ??= false;
+  return primitiveObject(
+    record,
+    (f) => ({
+      getState_PrimitiveType: () => 'Component',
+      getState_PrimitiveId: () => f.id,
+      getState_Component: () => ({ libraryUuid: 'lib1', uuid: 'dev1' }),
+      getState_Footprint: () => ({ libraryUuid: 'lib1', uuid: 'fp1' }),
+      getState_Layer: () => 1,
+      getState_X: () => f.x,
+      getState_Y: () => f.y,
+      getState_Rotation: () => f.rotation,
+      getState_PrimitiveLock: () => f.locked,
+      getState_AddIntoBom: () => true,
+      getState_Model3D: () => undefined,
+      getState_Designator: () => f.designator,
+      getState_Pads: () => f.pads,
+      getState_Name: () => f.designator,
+      getState_UniqueId: () => undefined,
+      getState_Manufacturer: () => undefined,
+      getState_ManufacturerId: () => undefined,
+      getState_Supplier: () => undefined,
+      getState_SupplierId: () => undefined,
+      getState_OtherProperty: () => ({}),
+    }),
+    write,
+  );
 }
 
 /** fullPadIds：让 getState_Pads() 给完整 ID，模拟 EDA 改了 ID 规则 */
@@ -699,7 +710,7 @@ function bboxLookup(boxes) {
   };
 }
 
-// ─── 搬迁元件 ───
+// ─── 移动、搬迁元件 ───
 //
 // 器件焊盘、导线、圆弧、过孔、填充区域都照 api-types.d.ts 逐个 getter 造。原来的 relocateComponent 在
 // pcb_PrimitivePad.getAll() 的焊盘上读 getState_Designator / getState_ParentPrimitiveId 这类不存在的 getter
@@ -708,6 +719,11 @@ function bboxLookup(boxes) {
 // 哪些图元连着焊盘由 EDA 的 getConnectedPrimitives() 判断，夹具里 connectedOf 就是它的回答：
 // 照 pcb.js 的连接检查，只含同一网络、层对得上、铜皮碰到焊盘的图元。
 // 真机上通孔焊盘、大焊盘的走线端点常常离焊盘中心好几 mil，所以夹具里的走线端点故意不放在焊盘中心。
+//
+// 元件的写回和丝印一样照 api.js 造（见丝印那一节的说明）：getAll 每次都照画布现状造新对象，
+// done() 把对象的全部字段写回画布。pcb_PrimitiveComponent.modify 调 done() 时没有 await，
+// EDA 拒绝写入也照样返回对象，原来的 pcb_move_component / pcb_relocate_component 因此把没挪成的元件报成挪好了，
+// 搬迁时走线还照删不误。
 
 /** IPCB_PrimitiveComponentPad：焊盘图元的全部 getter，外加父器件 ID 和 getConnectedPrimitives() */
 function pcbComponentPad(parentId, options, connected) {
@@ -766,8 +782,11 @@ function pcbFill({ id, net, layer = 1 }) {
   };
 }
 
-/** modifyFails：移动元件时照 api.js 抛错（pcb.js 的 component-modify 返回 null 时就是这样） */
-function relocateBoardMock({ modifyFails = false } = {}) {
+/**
+ * rejectWrite：EDA 拒绝写回这个元件（pcb.js 的 component-modify 回 null，api.js 的 done() 就抛「对象参数不正确」）；
+ * userEdit(canvas)：用户在 EDA 里改画布，第一次查元件焊盘时执行一次（这时元件已经查完）
+ */
+function relocateBoardMock({ rejectWrite, userEdit } = {}) {
   const R1 = '240bc228c1ee3a49';
   const H1 = '52930e4c1065e082';
   const U2 = '6b1f0c2d9e8a7f35';
@@ -836,29 +855,41 @@ function relocateBoardMock({ modifyFails = false } = {}) {
       net: p.net,
       padNumber: p.padNumber,
     }));
-  const components = [
-    pcbComponent({ id: R1, designator: 'R1', x: 440, y: 410, pads: refs(R1) }),
-    pcbComponent({ id: H1, designator: 'H1', x: 155, y: 80, pads: refs(H1) }),
-    pcbComponent({ id: U2, designator: 'U2', x: 700, y: 510, pads: refs(U2) }),
-    pcbComponent({ id: MK1, designator: 'MK1', x: 800, y: 800, pads: refs(MK1) }),
+  // 画布上的元件：每个元件一条记录。getAll 每次都照它造新对象，done() 把对象写回它
+  const canvas = [
+    { id: R1, designator: 'R1', x: 440, y: 410, pads: refs(R1) },
+    { id: H1, designator: 'H1', x: 155, y: 80, pads: refs(H1) },
+    { id: U2, designator: 'U2', x: 700, y: 510, pads: refs(U2) },
+    { id: MK1, designator: 'MK1', x: 800, y: 800, pads: refs(MK1) },
   ];
   const allLines = [t1, t2, w1, p1, b1, t8, q1, k1, u1];
 
   const deleted = { lines: [], arcs: [] };
-  const modified = [];
+  // EDA 收到的写回。done() 发出去的是整个对象，这里记下坐标和角度
+  const writes = [];
+  const write = async (obj) => {
+    const id = obj.getState_PrimitiveId();
+    if (id === rejectWrite) throw new Error('错误：对象参数不正确，无法应用到画布。');
+    writes.push({ id, x: obj.getState_X(), y: obj.getState_Y(), rotation: obj.getState_Rotation() });
+  };
+  let pendingEdit = userEdit;
   const api = {
     pcb_Primitive: { getPrimitivesBBox: bboxLookup(padBoxes) },
     pcb_PrimitiveComponent: {
-      getAll: async () => components,
+      getAll: async () => canvas.map((r) => pcbComponent(r, write)),
       // 照 api.js：一个焊盘都没有时返回 undefined
-      getAllPinsByPrimitiveId: async (id) =>
-        padsOf[id].length === 0
+      getAllPinsByPrimitiveId: async (id) => {
+        pendingEdit?.(canvas);
+        pendingEdit = undefined;
+        return padsOf[id].length === 0
           ? undefined
-          : padsOf[id].map((p) => pcbComponentPad(id, p, connectedOf[p.id] ?? [])),
+          : padsOf[id].map((p) => pcbComponentPad(id, p, connectedOf[p.id] ?? []));
+      },
       modify: async (id, property) => {
-        if (modifyFails) throw new Error('错误：对象参数不正确，无法应用到画布。');
-        modified.push({ id, property });
-        return components.find((c) => c.getState_PrimitiveId() === id);
+        const record = canvas.find((r) => r.id === id);
+        // api.js 按 ID 先 get()，查不到是 undefined，接着调 isAsync() 就抛了
+        if (!record) throw new TypeError("Cannot read properties of undefined (reading 'isAsync')");
+        return edaModify(pcbComponent(record, write), property);
       },
     },
     // 全板焊盘和按网络查走线也给上：原来的代码就是在这里面按不存在的 getter 找元件的焊盘
@@ -878,7 +909,7 @@ function relocateBoardMock({ modifyFails = false } = {}) {
       },
     },
   };
-  return { api, deleted, modified, ids: { R1, H1, U2, MK1 } };
+  return { api, deleted, writes, canvas, ids: { R1, H1, U2, MK1 } };
 }
 
 test('搬迁元件时删掉端点连在它焊盘上的走线和圆弧，横穿焊盘的线、过孔、填充不动', { skip }, async () => {
@@ -896,7 +927,7 @@ test('搬迁元件时删掉端点连在它焊盘上的走线和圆弧，横穿�
   assert.deepEqual(m.deleted.lines.sort(), ['t1', 't2', 'w1'], 'EDA 那边真的删了这几条线，横穿焊盘的 p1 不删');
   assert.deepEqual(m.deleted.arcs, ['a1'], '圆弧走线也是走线');
   assert.deepEqual(reply.data.netsToReroute, ['$1N15', '$1N16']);
-  assert.deepEqual(m.modified, [{ id: m.ids.R1, property: { x: 600, y: 410, rotation: 0 } }]);
+  assert.deepEqual(m.writes, [{ id: m.ids.R1, x: 600, y: 410, rotation: 0 }]);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
@@ -914,7 +945,7 @@ test('通孔元件：两个焊盘共用的线只删一次，没有焊盘的元�
   const mk1 = await runCommand(runtime, state, 'relocate_component', { designator: 'MK1', x: 900, y: 900 });
   assert.equal(mk1.ok, true, mk1.error);
   assert.deepEqual(mk1.data.deletedTracks, []);
-  assert.deepEqual(m.modified.map((mv) => mv.id), [m.ids.H1, m.ids.MK1]);
+  assert.deepEqual(m.writes.map((w) => w.id), [m.ids.H1, m.ids.MK1]);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
@@ -928,20 +959,102 @@ test('连到焊盘上的直线或圆弧被锁定时直接报错，一条都不�
   assert.match(reply.error, /锁定：k1、ka。/, '锁定的直线和圆弧都要点名');
   assert.deepEqual(m.deleted.lines, [], '没锁的 u1 也不能先删掉');
   assert.deepEqual(m.deleted.arcs, []);
-  assert.deepEqual(m.modified, []);
+  assert.deepEqual(m.writes, []);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
-test('移动元件失败时一条走线都不删', { skip }, async () => {
-  const m = relocateBoardMock({ modifyFails: true });
+test('EDA 拒绝写回元件时，移动和搬迁都要报错，搬迁一条走线都不删', { skip }, async () => {
+  for (const action of ['move_component', 'relocate_component']) {
+    const m = relocateBoardMock({ rejectWrite: '240bc228c1ee3a49' });
+    const { runtime, state } = boot({ extraApi: m.api });
+    await runtime.call('activate', 'onStartupFinished');
+
+    const reply = await runCommand(runtime, state, action, { designator: 'R1', x: 600, y: 410 });
+    assert.equal(reply.ok, false, `${action}：元件没挪成却报了成功`);
+    assert.match(reply.error, /无法应用到画布/);
+    assert.deepEqual(m.deleted.lines, []);
+    assert.deepEqual(m.deleted.arcs, []);
+    delete globalThis.__JLC_BRIDGE_HUB_V2__;
+  }
+});
+
+test('移动元件写回画布上的元件，没传角度就不动角度', { skip }, async () => {
+  const m = relocateBoardMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const turn = await runCommand(runtime, state, 'move_component', { designator: 'U2', x: 720, y: 530, rotation: 90 });
+  assert.equal(turn.ok, true, turn.error);
+  assert.equal(turn.data.rotation, 90);
+  const keep = await runCommand(runtime, state, 'move_component', { designator: 'H1', x: 160, y: 90 });
+  assert.equal(keep.ok, true, keep.error);
+  assert.equal(keep.data.rotation, 0);
+  assert.deepEqual(m.writes, [
+    { id: m.ids.U2, x: 720, y: 530, rotation: 90 },
+    { id: m.ids.H1, x: 160, y: 90, rotation: 0 },
+  ]);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('搬迁元件写回前重新读画布，不把用户刚改的位号、角度写回旧值', { skip }, async () => {
+  // done() 发的是对象的全部字段。搬迁先查元件，再逐个焊盘查连着的走线、取外框，最后才写回；
+  // 用查询时的旧对象写回，会把用户在这段时间里改过的位号（R1 → R9）、转过的角度（0° → 90°）写回去。
+  const m = relocateBoardMock({
+    userEdit: (canvas) => {
+      const r1 = canvas.find((r) => r.designator === 'R1');
+      r1.designator = 'R9';
+      r1.rotation = 90;
+    },
+  });
   const { runtime, state } = boot({ extraApi: m.api });
   await runtime.call('activate', 'onStartupFinished');
 
   const reply = await runCommand(runtime, state, 'relocate_component', { designator: 'R1', x: 600, y: 410 });
-  assert.equal(reply.ok, false);
-  assert.match(reply.error, /对象参数不正确/);
+  assert.equal(reply.ok, true, reply.error);
+  assert.equal(reply.data.rotation, 90, '没传角度时按画布上现在的角度');
+  const r1 = m.canvas.find((r) => r.id === m.ids.R1);
+  assert.equal(r1.designator, 'R9', '用户改过的位号被旧对象写回去了');
+  assert.equal(r1.rotation, 90, '用户转过的角度被旧对象写回去了');
+  assert.equal(r1.x, 600);
+  assert.equal(r1.y, 410);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('查询之后才被锁上的元件不动，走线也不删', { skip }, async () => {
+  const m = relocateBoardMock({
+    userEdit: (canvas) => {
+      canvas.find((r) => r.designator === 'R1').locked = true;
+    },
+  });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'relocate_component', { designator: 'R1', x: 600, y: 410 });
+  assert.equal(reply.ok, false, '锁定的元件被挪了');
+  assert.match(reply.error, /元件被锁定：R1/);
+  assert.deepEqual(m.writes, []);
   assert.deepEqual(m.deleted.lines, []);
   assert.deepEqual(m.deleted.arcs, []);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('移动、搬迁元件时坐标或角度不是有限数直接报错，不写画布', { skip }, async () => {
+  // setState_* 不检查参数：缺 x 时 EDA 那边什么都没改却回成功，角度不是数时元件的角度会被写成 NaN
+  const m = relocateBoardMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  for (const [action, params, pattern] of [
+    ['move_component', { designator: 'R1', y: 410 }, /x\/y 必须是数字/],
+    ['move_component', { designator: 'R1', x: 600, y: 410, rotation: 'abc' }, /rotation 必须是数字/],
+    ['relocate_component', { designator: 'R1', x: '600', y: 410 }, /x\/y 必须是数字/],
+  ]) {
+    const reply = await runCommand(runtime, state, action, params);
+    assert.equal(reply.ok, false, `${action} ${JSON.stringify(params)} 不该报成功`);
+    assert.match(reply.error, pattern);
+  }
+  assert.deepEqual(m.writes, []);
+  assert.deepEqual(m.deleted.lines, []);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 

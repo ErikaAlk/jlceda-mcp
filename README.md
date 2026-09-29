@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 59 项自动化测试
+npm test              # 63 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -140,6 +140,17 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 ## 更新记录
 
 ### 未发布
+
+**2026-09-29** `pcb_move_component`、`pcb_relocate_component`（以及逐个调用前者的 `pcb_batch_move`）在 EDA 拒绝写入时照样报成功。
+`pcb_PrimitiveComponent.modify` 在 `api.js` 里调 `done()` 时没有 await，EDA 报的「对象参数不正确，无法应用到画布」没人接；
+`pcb_relocate_component` 是先挪元件再删走线，元件没挪成，连着它的走线照样被删掉。
+现在取到元件图元对象后先 `reset()` 读回画布现状，改完坐标和角度再 await 它的 `done()`，写入失败直接报错，搬迁时一条走线都不删。
+`done()` 会把元件的全部字段（层、锁定、位号、BOM 标记和其它属性）写回画布，先 `reset()` 是为了不拿查询时的旧值
+盖掉用户在这段时间里改过的内容；没传 `rotation` 时保持画布上现在的角度，原来用的是查询时读到的角度。
+锁定改按 `reset()` 读回的状态判断，查询之后才被锁上的元件也不动。
+`x`、`y` 不是有限数、`rotation` 传了却不是有限数时直接报错：缺 `x` 时 EDA 什么都不改却回成功，角度不是数时元件角度会被写成 NaN。
+返回的 `rotation` 是写回后的角度，EDA 会把它换算到 0～360°（比如 -90 返回 270）。
+改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
 
 **2026-09-29** `pcb_get_silkscreens` 查不出元件位号，`pcb_auto_silkscreen` 因此从来没挪过位号。
 扩展只读 `pcb_PrimitiveString.getAll()`，EDA 的 `pcb.js` 在这个接口里按 `!getParent()` 过滤，只给不挂在元件上的文本；

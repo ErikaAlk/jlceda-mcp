@@ -18,18 +18,52 @@ import {
 
 // ─── 元件 ───
 
+type ComponentMove = { x: number; y: number; rotation?: number };
+
 async function findComponentRow(
   designator: string,
 ): Promise<{ id: string; row: IPCB_PrimitiveComponent }> {
   const api = edaApi();
-  if (!api?.pcb_PrimitiveComponent?.getAll || !api?.pcb_PrimitiveComponent?.modify) {
-    throw new Error('这版 嘉立创EDA 不支持修改元件');
-  }
+  if (!api?.pcb_PrimitiveComponent?.getAll) throw new Error('这版 嘉立创EDA 不支持查询元件');
   const rows: IPCB_PrimitiveComponent[] = await api.pcb_PrimitiveComponent.getAll();
   for (const row of rows) {
     if (row.getState_Designator() === designator) return { id: row.getState_PrimitiveId(), row };
   }
   throw new Error(`找不到元件：${designator}`);
+}
+
+/** setState_* 不检查参数：缺 x 时 EDA 什么都没改却回成功，角度不是数时元件的角度会被写成 NaN */
+function readComponentMove(params: ComponentMove): ComponentMove {
+  if (!Number.isFinite(params?.x) || !Number.isFinite(params?.y)) throw new Error('x/y 必须是数字');
+  if (params.rotation !== undefined && !Number.isFinite(params.rotation)) {
+    throw new Error('rotation 必须是数字');
+  }
+  return { x: params.x, y: params.y, rotation: params.rotation };
+}
+
+/**
+ * 把元件挪到新位置，写回画布，返回写回后的角度。
+ * 不调 pcb_PrimitiveComponent.modify：api.js 里它调 done() 时没有 await，
+ * EDA 拒绝写入时 done() 抛的「对象参数不正确，无法应用到画布」没人接，调用方照样拿到成功。
+ * 这里改完坐标直接 await 图元对象的 done()，发的是同一个 modify 请求，写入失败会抛到调用方。
+ * done() 发的是对象的全部字段（层、坐标、角度、锁定、位号、BOM 标记和其它属性，不含封装和焊盘），
+ * 所以写之前先 reset() 读回画布现状，免得拿查询时的旧值盖掉用户这段时间里改过的内容；
+ * 元件已经被删掉时 reset() 直接抛错。锁定按 reset() 读回的状态判断，查询之后才锁上的元件也不动。
+ */
+async function writeComponentMove(
+  designator: string,
+  row: IPCB_PrimitiveComponent,
+  move: ComponentMove,
+): Promise<number> {
+  // getAll 给的对象本来就是异步模式。同步模式下 reset() 和 setState_* 每改一个字段都会调一次 done()，同样不 await
+  row.toAsync();
+  await row.reset();
+  if (row.getState_PrimitiveLock()) throw new Error(`元件被锁定：${designator}`);
+  row.setState_X(move.x);
+  row.setState_Y(move.y);
+  if (move.rotation !== undefined) row.setState_Rotation(move.rotation);
+  await row.done();
+  return row.getState_Rotation();
 }
 
 export async function moveComponent(params: {
@@ -38,13 +72,10 @@ export async function moveComponent(params: {
   y: number;
   rotation?: number;
 }): Promise<any> {
-  const api = edaApi();
-  const { id, row } = await findComponentRow(params.designator);
-  if (row.getState_PrimitiveLock()) throw new Error(`元件被锁定：${params.designator}`);
-
-  const rotation = params.rotation ?? row.getState_Rotation();
-  await api.pcb_PrimitiveComponent.modify(id, { x: params.x, y: params.y, rotation });
-  return { moved: params.designator, x: params.x, y: params.y, rotation };
+  const move = readComponentMove(params);
+  const { row } = await findComponentRow(params.designator);
+  const rotation = await writeComponentMove(params.designator, row, move);
+  return { moved: params.designator, x: move.x, y: move.y, rotation };
 }
 
 /**
@@ -68,6 +99,7 @@ export async function relocateComponent(params: {
   y: number;
   rotation?: number;
 }): Promise<any> {
+  const move = readComponentMove(params);
   const api = edaApi();
   if (!api?.pcb_PrimitiveComponent?.getAllPinsByPrimitiveId) {
     throw new Error('这版 嘉立创EDA 不支持查询元件焊盘，没法找出连到元件上的走线');
@@ -121,8 +153,7 @@ export async function relocateComponent(params: {
       `连到 ${params.designator} 焊盘上的走线被锁定：${locked.join('、')}。解锁之后再搬，这次没有删任何走线，元件也没动`,
     );
   }
-  const rotation = params.rotation ?? targetRow.getState_Rotation();
-  await api.pcb_PrimitiveComponent.modify(targetId, { x: params.x, y: params.y, rotation });
+  const rotation = await writeComponentMove(params.designator, targetRow, move);
 
   if (lines.size > 0) await api.pcb_PrimitiveLine.delete([...lines.keys()]);
   if (arcs.size > 0) await api.pcb_PrimitiveArc.delete([...arcs.keys()]);
@@ -133,8 +164,8 @@ export async function relocateComponent(params: {
 
   return {
     moved: params.designator,
-    x: params.x,
-    y: params.y,
+    x: move.x,
+    y: move.y,
     rotation,
     deletedTracks,
     deletedTrackCount: deletedTracks.length,

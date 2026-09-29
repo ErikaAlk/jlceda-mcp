@@ -172,9 +172,19 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 
 `api.js` 里 14 个 PCB 图元类（文本、属性、元件、导线、过孔等）的 `modify()` 调 `done()` 时没有 await：
 EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画布」没人接，`modify()` 照样返回图元对象。
-要让写入失败报出来，取到图元对象后先 `reset()` 读回画布现状，`setState_*` 之后 await 它的 `done()`
-（见 `silkscreen.ts` 的 `writeMove()`）。`done()` 发的是对象的全部字段，不先 `reset()` 就会拿取对象时的旧值覆盖画布。
-类型包里没有 `reset()` / `done()`，用到的声明照 EDA 安装目录的 `api-types.d.ts` 补在 `jlc-bridge/src/eda-beta.d.ts`。
+要让写入失败报出来，取到图元对象后先 `toAsync()`、再 `reset()` 读回画布现状，`setState_*` 之后 await 它的 `done()`
+（见 `silkscreen.ts` 的 `writeMove()`、`pcb-edit.ts` 的 `writeComponentMove()`）。`done()` 发的是对象的全部字段，不先 `reset()` 就会拿取对象时的旧值覆盖画布。
+`toAsync()` 要放在 `reset()` 前面：同步模式下 `reset()` 里每个 `setState_*` 都会调一次不 await 的 `done()`。
+类型包 0.1.175 里文本、属性两类图元没有 `reset()` / `done()`（元件、导线等有），这两类的声明照 EDA 安装目录的 `api-types.d.ts` 补在 `jlc-bridge/src/eda-beta.d.ts`。
+
+元件的 `reset()` 读回的对象和 `getAll()` 给的不一样：`otherProperty` 是完整的 `attrsMap`（`getAll()` 去掉了位号、名称、BOM 标记等 8 个标准键），
+BOM 标记按 `!!attrsMap['Add into BOM']` 算，值是 `"no"` 也读成 `true`。写回时 `pcb.js` 的 `component-modify` 先按 BOM 标记把属性改成 `"yes"`，
+再按 `otherProperty` 用 `modifyATTRMap` 改回 `"no"`，画布上的 BOM 标记不变。改回这一步有个前提：元件上没有键为「Add into BOM」的属性图元。
+有的话走的是属性文字的 value setter，它看到文字上的值没变就直接返回，`attrsMap` 会停在 `"yes"`。
+本机两个真实工程里三块 PCB 的元件都没有这个属性图元：BOM 标记在器件上（`"yes"`），元件记录里只存改过的值（见过 `"no"`）。
+`done()` 不发封装和焊盘。
+
+元件 `get(单个 ID)` 查不到时返回 `undefined`；`reset()` 遇到已被删掉的元件时读空记录，抛 TypeError。
 
 运行中的 EDA 加载的是哪一版 `pcb.js` / `api.js`，看 `assets/pro-versions/<版本>/editor.ini`。
 
@@ -194,4 +204,4 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（59 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（63 项）。每条断言都对应一个踩过的坑，别随手删。
