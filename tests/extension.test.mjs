@@ -205,8 +205,6 @@ test('收到 cmd 会执行并把 res 发回去', { skip }, async () => {
       getState_X: () => 100,
       getState_Y: () => 200,
       getState_Rotation: () => 0,
-      getState_Width: () => 10,
-      getState_Height: () => 10,
       getState_Layer: () => 1,
       getState_PrimitiveLock: () => false,
       getState_Pads: () => [{ net: 'GND' }],
@@ -215,6 +213,9 @@ test('收到 cmd 会执行并把 res 发回去', { skip }, async () => {
   const { runtime, state } = boot({
     extraApi: {
       pcb_PrimitiveComponent: { getAll: async () => components },
+      pcb_Primitive: {
+        getPrimitivesBBox: async () => ({ minX: 95, minY: 195, maxX: 105, maxY: 205 }),
+      },
       pcb_Net: { getAllNetsName: async () => ['GND', 'VCC'], getNetLength: async () => 1 },
     },
   });
@@ -425,6 +426,72 @@ test('导线线宽读 getState_LineWidth，导线图元没有 getState_Width', {
   const netPrims = await runCommand(runtime, state, 'get_net_primitives', { net: 'GND' });
   assert.equal(netPrims.ok, true, netPrims.error);
   assert.equal(netPrims.data.tracks[0].width, 12, 'get_net_primitives 的线宽');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('元件宽高取自 getPrimitivesBBox，器件图元没有 getState_Width/Height', { skip }, async () => {
+  // 照 EDA 安装目录 pro-api 的 api-types.d.ts 里 IPCB_PrimitiveComponent 的 getter 逐个造，
+  // 里面没有任何尺寸 getter。原来读的是不存在的 getState_Width()/getState_Height()，
+  // pcb_get_state 返回的每个元件 width/height 都是 0，boardBounds 只剩元件中心点围成的框。
+  const component = (id, designator, x, y) => ({
+    getState_PrimitiveType: () => 'Component',
+    getState_PrimitiveId: () => id,
+    getState_Component: () => ({ libraryUuid: 'lib1', uuid: 'dev1' }),
+    getState_Footprint: () => ({ libraryUuid: 'lib1', uuid: 'fp1' }),
+    getState_Layer: () => 1,
+    getState_X: () => x,
+    getState_Y: () => y,
+    getState_Rotation: () => 0,
+    getState_PrimitiveLock: () => false,
+    getState_AddIntoBom: () => true,
+    getState_Model3D: () => undefined,
+    getState_Designator: () => designator,
+    getState_Pads: () => [{ primitiveId: `${id}-1`, net: 'GND', padNumber: '1' }],
+    getState_Name: () => designator,
+    getState_UniqueId: () => undefined,
+    getState_Manufacturer: () => undefined,
+    getState_ManufacturerId: () => undefined,
+    getState_Supplier: () => undefined,
+    getState_SupplierId: () => undefined,
+    getState_OtherProperty: () => ({}),
+  });
+  // 外框故意不以元件原点为中心：封装原点不一定在外框正中，
+  // 板框范围得按外框本身算，不能拿「中心点 ± 宽高一半」去凑。
+  const boxes = {
+    u1: { minX: 80, minY: 170, maxX: 140, maxY: 210 },
+    r1: { minX: 295, minY: 390, maxX: 305, maxY: 420 },
+  };
+  // 照 api.js 的实现：传进来的图元对象先换成 ID；一个图元回它自己的外框，多个回合并外框
+  const getPrimitivesBBox = async (items) => {
+    const hit = items
+      .map((item) => boxes[typeof item === 'string' ? item : item.getState_PrimitiveId()])
+      .filter(Boolean);
+    if (hit.length === 0) return undefined;
+    return {
+      minX: Math.min(...hit.map((b) => b.minX)),
+      minY: Math.min(...hit.map((b) => b.minY)),
+      maxX: Math.max(...hit.map((b) => b.maxX)),
+      maxY: Math.max(...hit.map((b) => b.maxY)),
+    };
+  };
+  const { runtime, state } = boot({
+    extraApi: {
+      pcb_PrimitiveComponent: {
+        getAll: async () => [component('u1', 'U1', 100, 200), component('r1', 'R1', 300, 400)],
+      },
+      pcb_Primitive: { getPrimitivesBBox },
+    },
+  });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_state');
+  assert.equal(reply.ok, true, reply.error);
+  const [u1, r1] = reply.data.components;
+  assert.equal(u1.width, 60, 'U1 的宽');
+  assert.equal(u1.height, 40, 'U1 的高');
+  assert.equal(r1.width, 10, 'R1 的宽');
+  assert.equal(r1.height, 30, 'R1 的高');
+  assert.deepEqual(reply.data.boardBounds, { minX: 80, minY: 170, maxX: 305, maxY: 420 });
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
