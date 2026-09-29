@@ -516,17 +516,31 @@ function pcbPad({ id, padNumber, net, x, y, layer = 1, pad, hole = null }) {
   };
 }
 
+/** api.js 的 getAll() 从 otherProperty 里去掉的 8 个标准键 */
+const COMPONENT_STANDARD_KEYS = [
+  'Add into BOM',
+  'Designator',
+  'Name',
+  'Unique ID',
+  'Manufacturer',
+  'Manufacturer Part',
+  'Supplier',
+  'Supplier Part',
+];
+
 /**
  * IPCB_PrimitiveComponent 的全部 getter 加写回用的方法（见 primitiveObject）。
- * record 是画布上的一条记录：{ id, designator, x, y, pads, rotation, locked }，缺的 rotation、locked 按 0° 和未锁定补进记录。
+ * record 是画布上的一条记录：{ id, designator, x, y, pads, rotation, locked, attrs, deleted }，
+ * attrs 是 attrsMap；缺的 rotation、locked、attrs 按 0°、未锁定、加入 BOM 补进记录。
  * write 是 done() 发给 EDA 的请求，只读的夹具不传。
  */
 function pcbComponent(record, write) {
   record.rotation ??= 0;
   record.locked ??= false;
+  record.attrs ??= { 'Add into BOM': 'yes' };
   return primitiveObject(
     record,
-    (f) => ({
+    (f, set) => ({
       getState_PrimitiveType: () => 'Component',
       getState_PrimitiveId: () => f.id,
       getState_Component: () => ({ libraryUuid: 'lib1', uuid: 'dev1' }),
@@ -536,7 +550,7 @@ function pcbComponent(record, write) {
       getState_Y: () => f.y,
       getState_Rotation: () => f.rotation,
       getState_PrimitiveLock: () => f.locked,
-      getState_AddIntoBom: () => true,
+      getState_AddIntoBom: () => f.addIntoBom,
       getState_Model3D: () => undefined,
       getState_Designator: () => f.designator,
       getState_Pads: () => f.pads,
@@ -546,9 +560,28 @@ function pcbComponent(record, write) {
       getState_ManufacturerId: () => undefined,
       getState_Supplier: () => undefined,
       getState_SupplierId: () => undefined,
-      getState_OtherProperty: () => ({}),
+      getState_OtherProperty: () => f.otherProperty,
+      setState_AddIntoBom: set('addIntoBom'),
+      // 照 api.js 的 Rr()：负角度加 360，其余对 360 取余
+      setState_Rotation: (rotation) => set('rotation')(rotation < 0 ? (rotation % 360) + 360 : rotation % 360),
     }),
     write,
+    {
+      // 照 api.js 的 getAll()：BOM 标记按 === 'yes' 读，otherProperty 去掉 8 个标准键
+      load: (r) => ({
+        ...r,
+        addIntoBom: r.attrs['Add into BOM'] === 'yes',
+        otherProperty: Object.fromEntries(
+          Object.entries(r.attrs).filter(([key]) => !COMPONENT_STANDARD_KEYS.includes(key)),
+        ),
+      }),
+      // 照 api.js 的 reset()：元件被删掉时按 ID 读回空记录，接着读 attrsMap 就抛了；
+      // BOM 标记按 !! 读（"no" 也是 true），otherProperty 是完整的 attrsMap
+      reload: (r) => {
+        if (r.deleted) throw new TypeError("Cannot read properties of undefined (reading 'attrsMap')");
+        return { ...r, addIntoBom: !!r.attrs['Add into BOM'], otherProperty: { ...r.attrs } };
+      },
+    },
   );
 }
 
@@ -855,28 +888,35 @@ function relocateBoardMock({ rejectWrite, userEdit } = {}) {
       net: p.net,
       padNumber: p.padNumber,
     }));
-  // 画布上的元件：每个元件一条记录。getAll 每次都照它造新对象，done() 把对象写回它
+  // 画布上的元件：每个元件一条记录。getAll 每次都照它造新对象，done() 把对象写回它。
+  // MK1 是不加入 BOM 的标记（attrsMap 里 Add into BOM 是 "no"）
   const canvas = [
     { id: R1, designator: 'R1', x: 440, y: 410, pads: refs(R1) },
     { id: H1, designator: 'H1', x: 155, y: 80, pads: refs(H1) },
     { id: U2, designator: 'U2', x: 700, y: 510, pads: refs(U2) },
-    { id: MK1, designator: 'MK1', x: 800, y: 800, pads: refs(MK1) },
+    { id: MK1, designator: 'MK1', x: 800, y: 800, pads: refs(MK1), attrs: { 'Add into BOM': 'no' } },
   ];
   const allLines = [t1, t2, w1, p1, b1, t8, q1, k1, u1];
 
   const deleted = { lines: [], arcs: [] };
-  // EDA 收到的写回。done() 发出去的是整个对象，这里记下坐标和角度
+  // EDA 收到的写回。done() 发出去的是整个对象，这里记下坐标、角度和 BOM 标记
   const writes = [];
   const write = async (obj) => {
     const id = obj.getState_PrimitiveId();
     if (id === rejectWrite) throw new Error('错误：对象参数不正确，无法应用到画布。');
-    writes.push({ id, x: obj.getState_X(), y: obj.getState_Y(), rotation: obj.getState_Rotation() });
+    writes.push({
+      id,
+      x: obj.getState_X(),
+      y: obj.getState_Y(),
+      rotation: obj.getState_Rotation(),
+      addIntoBom: obj.getState_AddIntoBom(),
+    });
   };
   let pendingEdit = userEdit;
   const api = {
     pcb_Primitive: { getPrimitivesBBox: bboxLookup(padBoxes) },
     pcb_PrimitiveComponent: {
-      getAll: async () => canvas.map((r) => pcbComponent(r, write)),
+      getAll: async () => canvas.filter((r) => !r.deleted).map((r) => pcbComponent(r, write)),
       // 照 api.js：一个焊盘都没有时返回 undefined
       getAllPinsByPrimitiveId: async (id) => {
         pendingEdit?.(canvas);
@@ -886,7 +926,7 @@ function relocateBoardMock({ rejectWrite, userEdit } = {}) {
           : padsOf[id].map((p) => pcbComponentPad(id, p, connectedOf[p.id] ?? []));
       },
       modify: async (id, property) => {
-        const record = canvas.find((r) => r.id === id);
+        const record = canvas.find((r) => r.id === id && !r.deleted);
         // api.js 按 ID 先 get()，查不到是 undefined，接着调 isAsync() 就抛了
         if (!record) throw new TypeError("Cannot read properties of undefined (reading 'isAsync')");
         return edaModify(pcbComponent(record, write), property);
@@ -927,7 +967,7 @@ test('搬迁元件时删掉端点连在它焊盘上的走线和圆弧，横穿�
   assert.deepEqual(m.deleted.lines.sort(), ['t1', 't2', 'w1'], 'EDA 那边真的删了这几条线，横穿焊盘的 p1 不删');
   assert.deepEqual(m.deleted.arcs, ['a1'], '圆弧走线也是走线');
   assert.deepEqual(reply.data.netsToReroute, ['$1N15', '$1N16']);
-  assert.deepEqual(m.writes, [{ id: m.ids.R1, x: 600, y: 410, rotation: 0 }]);
+  assert.deepEqual(m.writes, [{ id: m.ids.R1, x: 600, y: 410, rotation: 0, addIntoBom: true }]);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
@@ -978,22 +1018,41 @@ test('EDA 拒绝写回元件时，移动和搬迁都要报错，搬迁一条走�
   }
 });
 
-test('移动元件写回画布上的元件，没传角度就不动角度', { skip }, async () => {
+test('移动元件写回画布上的元件，返回 EDA 换算后的角度，没传角度就不动角度', { skip }, async () => {
   const m = relocateBoardMock();
   const { runtime, state } = boot({ extraApi: m.api });
   await runtime.call('activate', 'onStartupFinished');
 
-  const turn = await runCommand(runtime, state, 'move_component', { designator: 'U2', x: 720, y: 530, rotation: 90 });
+  const turn = await runCommand(runtime, state, 'move_component', { designator: 'U2', x: 720, y: 530, rotation: -90 });
   assert.equal(turn.ok, true, turn.error);
-  assert.equal(turn.data.rotation, 90);
+  assert.equal(turn.data.rotation, 270, 'EDA 把角度换算到 0～360°，返回的是写回后的角度');
   const keep = await runCommand(runtime, state, 'move_component', { designator: 'H1', x: 160, y: 90 });
   assert.equal(keep.ok, true, keep.error);
   assert.equal(keep.data.rotation, 0);
   assert.deepEqual(m.writes, [
-    { id: m.ids.U2, x: 720, y: 530, rotation: 90 },
-    { id: m.ids.H1, x: 160, y: 90, rotation: 0 },
+    { id: m.ids.U2, x: 720, y: 530, rotation: 270, addIntoBom: true },
+    { id: m.ids.H1, x: 160, y: 90, rotation: 0, addIntoBom: true },
   ]);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('不加入 BOM 的元件挪完仍然不加入 BOM', { skip }, async () => {
+  // reset() 按 !!attrsMap['Add into BOM'] 读 BOM 标记，"no" 也读成 true。照这个值写回，
+  // 元件上挂着「Add into BOM」属性文字时，pcb.js 把属性改成 "yes" 之后就改不回来了
+  for (const action of ['move_component', 'relocate_component']) {
+    const m = relocateBoardMock();
+    const { runtime, state } = boot({ extraApi: m.api });
+    await runtime.call('activate', 'onStartupFinished');
+
+    const reply = await runCommand(runtime, state, action, { designator: 'MK1', x: 900, y: 900 });
+    assert.equal(reply.ok, true, reply.error);
+    assert.deepEqual(
+      m.writes.map((w) => w.addIntoBom),
+      [false],
+      `${action}：写回时把不加入 BOM 的元件改成了加入 BOM`,
+    );
+    delete globalThis.__JLC_BRIDGE_HUB_V2__;
+  }
 });
 
 test('搬迁元件写回前重新读画布，不把用户刚改的位号、角度写回旧值', { skip }, async () => {
@@ -1038,8 +1097,26 @@ test('查询之后才被锁上的元件不动，走线也不删', { skip }, asyn
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
+test('搬迁途中元件被删掉时直接报错，一条走线都不删', { skip }, async () => {
+  const m = relocateBoardMock({
+    userEdit: (canvas) => {
+      canvas.find((r) => r.designator === 'R1').deleted = true;
+    },
+  });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'relocate_component', { designator: 'R1', x: 600, y: 410 });
+  assert.equal(reply.ok, false, '元件已经不在了却报了成功');
+  assert.match(reply.error, /attrsMap/, '报的应该是 reset() 读回空记录的错');
+  assert.deepEqual(m.writes, []);
+  assert.deepEqual(m.deleted.lines, []);
+  assert.deepEqual(m.deleted.arcs, []);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
 test('移动、搬迁元件时坐标或角度不是有限数直接报错，不写画布', { skip }, async () => {
-  // setState_* 不检查参数：缺 x 时 EDA 那边什么都没改却回成功，角度不是数时元件的角度会被写成 NaN
+  // setState_* 不检查参数：缺 x 时 EDA 只是不改 x，照样回成功；角度不是数时元件的角度会被写成 NaN
   const m = relocateBoardMock();
   const { runtime, state } = boot({ extraApi: m.api });
   await runtime.call('activate', 'onStartupFinished');
@@ -1074,10 +1151,12 @@ test('移动、搬迁元件时坐标或角度不是有限数直接报错，不�
 
 /**
  * 照画布上的一条记录造图元对象，方法都是 api-types.d.ts 里有的。
- * fields 是记录的一份拷贝，getter 读它；reset() 从画布重新拷一份，done() 交给 write() 后把整份拷贝写回画布。
+ * fields 是从记录读出来的对象字段，getter 读它；reset() 从画布重新读一遍，done() 交给 write() 后把整份字段写回画布。
+ * getters(fields, set) 给这类图元的 getter，也可以改写 setState_*（set(key) 造一个改 fields[key] 的 setter）。
+ * load(record) 是 getAll 造对象时怎么读记录，reload(record) 是 reset() 怎么读，两者不一样的图元（元件）自己给。
  */
-function primitiveObject(record, getters, write) {
-  const fields = { ...record };
+function primitiveObject(record, getters, write, { load = (r) => ({ ...r }), reload = load } = {}) {
+  const fields = load(record);
   let async = true;
   const obj = {};
   const set = (key) => (value) => {
@@ -1085,19 +1164,23 @@ function primitiveObject(record, getters, write) {
     if (!async) obj.done();
     return obj;
   };
-  return Object.assign(obj, getters(fields), {
-    setState_X: set('x'),
-    setState_Y: set('y'),
-    setState_Rotation: set('rotation'),
-    isAsync: () => async,
-    toAsync: () => ((async = true), obj),
-    reset: async () => (Object.assign(fields, record), obj),
-    done: async () => {
-      await write(obj);
-      Object.assign(record, fields);
-      return obj;
+  return Object.assign(
+    obj,
+    {
+      setState_X: set('x'),
+      setState_Y: set('y'),
+      setState_Rotation: set('rotation'),
+      isAsync: () => async,
+      toAsync: () => ((async = true), obj),
+      reset: async () => (Object.assign(fields, reload(record)), obj),
+      done: async () => {
+        await write(obj);
+        Object.assign(record, fields);
+        return obj;
+      },
     },
-  });
+    getters(fields, set),
+  );
 }
 
 /** 照 api.js 的 modify：改完字段调 done() 却不 await，直接把对象返回 */

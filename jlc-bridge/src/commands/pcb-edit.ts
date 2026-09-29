@@ -32,7 +32,7 @@ async function findComponentRow(
   throw new Error(`找不到元件：${designator}`);
 }
 
-/** setState_* 不检查参数：缺 x 时 EDA 什么都没改却回成功，角度不是数时元件的角度会被写成 NaN */
+/** setState_* 不检查参数：缺 x 时 EDA 只是不改 x，照样回成功；角度不是数时元件的角度会被写成 NaN */
 function readComponentMove(params: ComponentMove): ComponentMove {
   if (!Number.isFinite(params?.x) || !Number.isFinite(params?.y)) throw new Error('x/y 必须是数字');
   if (params.rotation !== undefined && !Number.isFinite(params.rotation)) {
@@ -49,6 +49,11 @@ function readComponentMove(params: ComponentMove): ComponentMove {
  * done() 发的是对象的全部字段（层、坐标、角度、锁定、位号、BOM 标记和其它属性，不含封装和焊盘），
  * 所以写之前先 reset() 读回画布现状，免得拿查询时的旧值盖掉用户这段时间里改过的内容；
  * 元件已经被删掉时 reset() 直接抛错。锁定按 reset() 读回的状态判断，查询之后才锁上的元件也不动。
+ *
+ * reset() 读 BOM 标记用的是 !!attrsMap['Add into BOM']，不加入 BOM 的元件（值是 "no"）也读成 true。
+ * 照这个值写回，pcb.js 会先把属性改成 "yes"，再靠 otherProperty 改回 "no"；元件上挂着
+ * 「Add into BOM」属性文字时，改回这一步走属性文字的 value setter，它看值没变就返回，BOM 标记停在 "yes"。
+ * 所以 reset() 之后按属性表里的原值重新设 BOM 标记，写回时就不会先改再改回。
  */
 async function writeComponentMove(
   designator: string,
@@ -59,6 +64,10 @@ async function writeComponentMove(
   row.toAsync();
   await row.reset();
   if (row.getState_PrimitiveLock()) throw new Error(`元件被锁定：${designator}`);
+  // reset() 之后 otherProperty 是画布上完整的属性表
+  const attrs = row.getState_OtherProperty();
+  if (!attrs) throw new Error(`读回的元件 ${designator} 没有属性表，没法确定 BOM 标记`);
+  row.setState_AddIntoBom(attrs['Add into BOM'] === 'yes');
   row.setState_X(move.x);
   row.setState_Y(move.y);
   if (move.rotation !== undefined) row.setState_Rotation(move.rotation);

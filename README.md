@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 63 项自动化测试
+npm test              # 65 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -148,7 +148,9 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 `done()` 会把元件的全部字段（层、锁定、位号、BOM 标记和其它属性）写回画布，先 `reset()` 是为了不拿查询时的旧值
 盖掉用户在这段时间里改过的内容；没传 `rotation` 时保持画布上现在的角度，原来用的是查询时读到的角度。
 锁定改按 `reset()` 读回的状态判断，查询之后才被锁上的元件也不动。
-`x`、`y` 不是有限数、`rotation` 传了却不是有限数时直接报错：缺 `x` 时 EDA 什么都不改却回成功，角度不是数时元件角度会被写成 NaN。
+`reset()` 会把不加入 BOM 的元件读成加入 BOM，照这个值写回，元件上挂着「Add into BOM」属性文字时 BOM 标记会被改掉，
+所以写回前按属性表里的原值重新设 BOM 标记。
+`x`、`y` 不是有限数、`rotation` 传了却不是有限数时直接报错：缺 `x` 时 EDA 只是不改 `x`，照样回成功；角度不是数时元件角度会被写成 NaN。
 返回的 `rotation` 是写回后的角度，EDA 会把它换算到 0～360°（比如 -90 返回 270）。
 改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
 
