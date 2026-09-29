@@ -701,20 +701,26 @@ function bboxLookup(boxes) {
 
 // ─── 搬迁元件 ───
 //
-// 器件焊盘和导线也照 api-types.d.ts 逐个 getter 造。原来的 relocateComponent 在 pcb_PrimitivePad.getAll()
-// 的焊盘上读 getState_Designator / getState_ParentPrimitiveId 这类不存在的 getter 去认「哪些焊盘是这个元件的」，
-// 一个都认不出来，pcb_relocate_component 的自动断线从来没删过任何走线。
+// 器件焊盘、导线、圆弧、过孔、填充区域都照 api-types.d.ts 逐个 getter 造。原来的 relocateComponent 在
+// pcb_PrimitivePad.getAll() 的焊盘上读 getState_Designator / getState_ParentPrimitiveId 这类不存在的 getter
+// 去认「哪些焊盘是这个元件的」，一个都认不出来，pcb_relocate_component 的自动断线从来没删过任何走线。
+//
+// 哪些图元连着焊盘由 EDA 的 getConnectedPrimitives() 判断，夹具里 connectedOf 就是它的回答。
+// 真机上通孔焊盘、大焊盘的走线端点常常离焊盘中心好几 mil，所以夹具里的走线端点故意不放在焊盘中心。
 
-/** IPCB_PrimitiveComponentPad：焊盘图元的全部 getter，外加父器件 ID */
-function pcbComponentPad(parentId, options) {
+/** IPCB_PrimitiveComponentPad：焊盘图元的全部 getter，外加父器件 ID 和 getConnectedPrimitives() */
+function pcbComponentPad(parentId, options, connected) {
   return {
     ...pcbPad(options),
     getState_PrimitiveType: () => 'ComponentPad',
     getState_ParentComponentPrimitiveId: () => parentId,
+    // 照 api.js：参数为 true 时不带填充区域，别的照给
+    getConnectedPrimitives: async (onlyCentreConnection) =>
+      connected.filter((item) => !onlyCentreConnection || item.getState_PrimitiveType() !== 'Fill'),
   };
 }
 
-function pcbLine({ id, net, from, to, layer = 1 }) {
+function pcbLine({ id, net, from = [0, 0], to = [0, 0], layer = 1, locked = false }) {
   return {
     getState_PrimitiveType: () => 'Line',
     getState_PrimitiveId: () => id,
@@ -725,29 +731,82 @@ function pcbLine({ id, net, from, to, layer = 1 }) {
     getState_EndX: () => to[0],
     getState_EndY: () => to[1],
     getState_LineWidth: () => 10,
+    getState_PrimitiveLock: () => locked,
+  };
+}
+
+function pcbArc({ id, net, layer = 1 }) {
+  return {
+    getState_PrimitiveType: () => 'Arc',
+    getState_PrimitiveId: () => id,
+    getState_Net: () => net,
+    getState_Layer: () => layer,
+    getState_StartX: () => 0,
+    getState_StartY: () => 0,
+    getState_EndX: () => 10,
+    getState_EndY: () => 10,
+    getState_ArcAngle: () => 90,
+    getState_LineWidth: () => 10,
+    getState_InteractiveMode: () => 1,
     getState_PrimitiveLock: () => false,
   };
 }
 
-test('搬迁元件时删掉连到它焊盘上的走线，别的走线不动', { skip }, async () => {
+function pcbFill({ id, net, layer = 1 }) {
+  return {
+    getState_PrimitiveType: () => 'Fill',
+    getState_PrimitiveId: () => id,
+    getState_Net: () => net,
+    getState_Layer: () => layer,
+    getState_ComplexPolygon: () => undefined,
+    getState_FillMode: () => undefined,
+    getState_LineWidth: () => 0,
+    getState_PrimitiveLock: () => false,
+  };
+}
+
+function relocateBoardMock() {
   const R1 = '240bc228c1ee3a49';
-  const LED1 = '77c7fafe2c6e66e1';
   const H1 = '52930e4c1065e082';
+  const U2 = '6b1f0c2d9e8a7f35';
+  const MK1 = '0d4e2f9a1b3c5e77';
   const smd = ['RECT', 31.5, 35.4, 0];
   const tht = { layer: 12, pad: ['RECT', 60, 60, 0], hole: ['ROUND', 40] };
+
+  const line = (id, net, extra) => pcbLine({ id, net, ...extra });
+  const t1 = line('t1', '$1N16', { from: [440, 381.9], to: [439.5, 305] });
+  const t2 = line('t2', '$1N15', { from: [440, 500], to: [440, 452.5] }); // 端点在焊盘里，离中心 12.8 mil
+  const x1 = line('x1', 'GND', { from: [430, 430], to: [300, 430] }); // 别的网络的线压在焊盘上
+  const b1 = line('b1', '+5V', { from: [55, 75], to: [255, 75] }); // H1.1 和 H1.3 共用
+  const t8 = line('t8', '+5V', { from: [0, 80], to: [52, 80], layer: 2 });
+  const n1 = line('n1', '', { from: [155, 75], to: [155, 20] }); // 没有网络的焊盘连着没有网络的线
+  const k1 = line('k1', 'SDA', { locked: true });
+  const u1 = line('u1', 'SCL');
+
   const padsOf = {
     [R1]: [
       { id: `${R1}e7`, padNumber: '1', net: '$1N15', x: 440, y: 439.7, pad: smd },
       { id: `${R1}e8`, padNumber: '2', net: '$1N16', x: 440, y: 380.3, pad: smd },
     ],
-    [LED1]: [
-      { id: `${LED1}e21`, padNumber: '1', net: '$1N16', x: 439.5, y: 305, pad: smd },
-      { id: `${LED1}e22`, padNumber: '2', net: 'GND', x: 380.5, y: 305, pad: smd },
-    ],
     [H1]: [
       { id: `${H1}e15`, padNumber: '1', net: '+5V', x: 55, y: 80, ...tht },
-      { id: `${H1}e16`, padNumber: '2', net: 'PA0', x: 155, y: 80, ...tht },
+      { id: `${H1}e16`, padNumber: '2', net: '', x: 155, y: 80, ...tht },
+      { id: `${H1}e17`, padNumber: '3', net: '+5V', x: 255, y: 80, ...tht },
     ],
+    [U2]: [
+      { id: `${U2}e3`, padNumber: '3', net: 'SDA', x: 700, y: 500, pad: smd },
+      { id: `${U2}e4`, padNumber: '4', net: 'SCL', x: 700, y: 520, pad: smd },
+    ],
+    [MK1]: [],
+  };
+  const connectedOf = {
+    [`${R1}e7`]: [t2, pcbArc({ id: 'a1', net: '$1N15' }), pcbVia({ id: 'v1', net: '$1N15', x: 440, y: 439.7, diameter: 24 }), x1],
+    [`${R1}e8`]: [t1, pcbFill({ id: 'f1', net: '$1N16' })],
+    [`${H1}e15`]: [b1, t8],
+    [`${H1}e16`]: [n1],
+    [`${H1}e17`]: [b1],
+    [`${U2}e3`]: [k1],
+    [`${U2}e4`]: [u1],
   };
   // getState_Pads() 里的焊盘 ID 只有后缀
   const refs = (componentId) =>
@@ -758,45 +817,50 @@ test('搬迁元件时删掉连到它焊盘上的走线，别的走线不动', { 
     }));
   const components = [
     pcbComponent({ id: R1, designator: 'R1', x: 440, y: 410, pads: refs(R1) }),
-    pcbComponent({ id: LED1, designator: 'LED1', x: 410, y: 305, pads: refs(LED1) }),
-    pcbComponent({ id: H1, designator: 'H1', x: 305, y: 80, pads: refs(H1) }),
+    pcbComponent({ id: H1, designator: 'H1', x: 155, y: 80, pads: refs(H1) }),
+    pcbComponent({ id: U2, designator: 'U2', x: 700, y: 510, pads: refs(U2) }),
+    pcbComponent({ id: MK1, designator: 'MK1', x: 800, y: 800, pads: refs(MK1) }),
   ];
-  const lines = [
-    pcbLine({ id: 't1', net: '$1N16', from: [440, 380.3], to: [439.5, 305] }), // R1.2 → LED1.1
-    pcbLine({ id: 't2', net: '$1N15', from: [440, 500], to: [440, 439.7] }), // 终点落在 R1.1
-    pcbLine({ id: 't3', net: '$1N15', from: [440, 500], to: [300, 500] }), // 同一网络，不碰 R1
-    pcbLine({ id: 't4', net: '$1N16', from: [439.5, 305], to: [439.5, 250] }), // 同一网络，只连 LED1
-    pcbLine({ id: 't5', net: 'GND', from: [380.5, 305], to: [300, 305] }),
-    // 底层走线的端点正好在顶层贴片焊盘 R1.1 的正下方：它连的是那里的过孔，不是焊盘
-    pcbLine({ id: 't6', net: '$1N15', from: [440, 439.7], to: [500, 439.7], layer: 2 }),
-    // 通孔焊盘各层都连得上
-    pcbLine({ id: 't7', net: '+5V', from: [55, 80], to: [55, 200], layer: 1 }),
-    pcbLine({ id: 't8', net: '+5V', from: [0, 80], to: [55, 80], layer: 2 }),
-  ];
+  const allLines = [t1, t2, x1, b1, t8, n1, k1, u1];
 
-  const deleted = [];
+  const deleted = { lines: [], arcs: [] };
   const modified = [];
-  const { runtime, state } = boot({
-    extraApi: {
-      pcb_PrimitiveComponent: {
-        getAll: async () => components,
-        getAllPinsByPrimitiveId: async (id) => padsOf[id]?.map((p) => pcbComponentPad(id, p)),
-        modify: async (id, property) => {
-          modified.push({ id, property });
-          return components.find((c) => c.getState_PrimitiveId() === id);
-        },
-      },
-      // 全板焊盘也给上：原来的代码就是在这里面按不存在的 getter 找元件的焊盘
-      pcb_PrimitivePad: { getAll: async () => Object.values(padsOf).flat().map(pcbPad) },
-      pcb_PrimitiveLine: {
-        getAll: async (net) => lines.filter((l) => net === undefined || l.getState_Net() === net),
-        delete: async (ids) => {
-          deleted.push(...[ids].flat());
-          return true;
-        },
+  const api = {
+    pcb_PrimitiveComponent: {
+      getAll: async () => components,
+      // 照 api.js：一个焊盘都没有时返回 undefined
+      getAllPinsByPrimitiveId: async (id) =>
+        padsOf[id].length === 0
+          ? undefined
+          : padsOf[id].map((p) => pcbComponentPad(id, p, connectedOf[p.id] ?? [])),
+      modify: async (id, property) => {
+        modified.push({ id, property });
+        return components.find((c) => c.getState_PrimitiveId() === id);
       },
     },
-  });
+    // 全板焊盘和按网络查走线也给上：原来的代码就是在这里面按不存在的 getter 找元件的焊盘
+    pcb_PrimitivePad: { getAll: async () => Object.values(padsOf).flat().map(pcbPad) },
+    pcb_PrimitiveLine: {
+      getAll: async (net) => allLines.filter((l) => net === undefined || l.getState_Net() === net),
+      delete: async (ids) => {
+        deleted.lines.push(...[ids].flat());
+        return true;
+      },
+    },
+    pcb_PrimitiveArc: {
+      getAll: async () => [],
+      delete: async (ids) => {
+        deleted.arcs.push(...[ids].flat());
+        return true;
+      },
+    },
+  };
+  return { api, deleted, modified, ids: { R1, H1, U2, MK1 } };
+}
+
+test('搬迁元件时删掉连到它焊盘上的走线和圆弧，过孔、填充、别的网络的线不动', { skip }, async () => {
+  const m = relocateBoardMock();
+  const { runtime, state } = boot({ extraApi: m.api });
   await runtime.call('activate', 'onStartupFinished');
 
   const reply = await runCommand(runtime, state, 'relocate_component', {
@@ -805,15 +869,42 @@ test('搬迁元件时删掉连到它焊盘上的走线，别的走线不动', { 
     y: 410,
   });
   assert.equal(reply.ok, true, reply.error);
-  assert.deepEqual([...reply.data.deletedTracks].sort(), ['t1', 't2']);
-  assert.deepEqual(deleted.sort(), ['t1', 't2'], 'EDA 那边真的删了这两条');
+  assert.deepEqual([...reply.data.deletedTracks].sort(), ['a1', 't1', 't2']);
+  assert.deepEqual(m.deleted.lines.sort(), ['t1', 't2'], 'EDA 那边真的删了这两条线');
+  assert.deepEqual(m.deleted.arcs, ['a1'], '圆弧走线也是走线');
   assert.deepEqual(reply.data.netsToReroute, ['$1N15', '$1N16']);
-  assert.deepEqual(modified, [{ id: R1, property: { x: 600, y: 410, rotation: 0 } }]);
+  assert.deepEqual(m.modified, [{ id: m.ids.R1, property: { x: 600, y: 410, rotation: 0 } }]);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
 
-  deleted.length = 0;
-  const h1 = await runCommand(runtime, state, 'relocate_component', { designator: 'H1', x: 305, y: 150 });
+test('通孔元件：两个焊盘共用的线只删一次，没有网络的焊盘上的线也删', { skip }, async () => {
+  const m = relocateBoardMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const h1 = await runCommand(runtime, state, 'relocate_component', { designator: 'H1', x: 155, y: 150 });
   assert.equal(h1.ok, true, h1.error);
-  assert.deepEqual(deleted.sort(), ['t7', 't8'], '通孔焊盘上顶层、底层的走线都要删');
+  assert.deepEqual(m.deleted.lines.sort(), ['b1', 'n1', 't8']);
+  assert.deepEqual(h1.data.netsToReroute, ['+5V']);
+
+  // 没有焊盘的元件照常搬
+  const mk1 = await runCommand(runtime, state, 'relocate_component', { designator: 'MK1', x: 900, y: 900 });
+  assert.equal(mk1.ok, true, mk1.error);
+  assert.deepEqual(mk1.data.deletedTracks, []);
+  assert.deepEqual(m.modified.map((mv) => mv.id), [m.ids.H1, m.ids.MK1]);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('连到焊盘上的走线被锁定时直接报错，一条都不删，元件也不动', { skip }, async () => {
+  const m = relocateBoardMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'relocate_component', { designator: 'U2', x: 700, y: 600 });
+  assert.equal(reply.ok, false);
+  assert.match(reply.error, /锁定：k1/);
+  assert.deepEqual(m.deleted.lines, [], '没锁的 u1 也不能先删掉');
+  assert.deepEqual(m.modified, []);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
@@ -859,8 +950,8 @@ function pcbVia({ id, net, x, y, diameter }) {
   };
 }
 
-/** withoutBox：让 getPrimitivesBBox 对这个图元给 undefined */
-function silkBoardMock({ withoutBox } = {}) {
+/** withoutBox：让 getPrimitivesBBox 对这个图元给 undefined；onlyCopperText：板上只有铜皮层上的那条文字 */
+function silkBoardMock({ withoutBox, onlyCopperText = false } = {}) {
   const boxes = {
     outline: { minX: 0, minY: 0, maxX: 1000, maxY: 1000 },
     // 80×50 的大焊盘，中心 (440, 305)
@@ -873,12 +964,13 @@ function silkBoardMock({ withoutBox } = {}) {
   };
   delete boxes[withoutBox];
 
-  const strings = [
+  const allStrings = [
     pcbString({ id: 's1', text: 'R1', x: 474, y: 334, layer: 3 }),
     pcbString({ id: 's2', text: 'GND', x: 200, y: 215, layer: 4 }),
     // 顶层铜皮上的文字，不是丝印
     pcbString({ id: 's3', text: 'NOTE', x: 440, y: 305, layer: 1 }),
   ];
+  const strings = onlyCopperText ? allStrings.slice(2) : allStrings;
   const moved = [];
   return {
     moved,
@@ -957,6 +1049,19 @@ test('焊盘或过孔取不到外框时直接报错，不许拿猜的框去判�
     assert.match(reply.error, new RegExp(`${kind} ${id} 取不到外框`));
     delete globalThis.__JLC_BRIDGE_HUB_V2__;
   }
+});
+
+test('丝印层上没有文本时就是 0 条，不拿别的层的文本充数', { skip }, async () => {
+  // 原来顶层、底层丝印读不到文本时，会把所有层的文本都当成丝印返回。
+  // 这时也没有东西要判冲突，不该去取焊盘外框：pad1 故意取不到外框，取了就会报错。
+  const m = silkBoardMock({ onlyCopperText: true, withoutBox: 'pad1' });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_silkscreens', { includeConflicts: true });
+  assert.equal(reply.ok, true, reply.error);
+  assert.deepEqual(reply.data.silkscreens, []);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
 // ─── 原理图 ───

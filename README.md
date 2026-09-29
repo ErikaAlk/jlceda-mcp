@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 49 项自动化测试
+npm test              # 52 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -145,17 +145,19 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 扩展要从 `pcb_PrimitivePad.getAll()` 的焊盘里挑出这个元件的焊盘，读的是 `getState_Designator()`、`getState_ParentPrimitiveId()`、
 `getState_CenterX()` 这些方法，EDA 的焊盘图元 `IPCB_PrimitivePad` 一个都没有（对照 EDA 安装目录 `pro-api` 下的 `api-types.d.ts` 核实），
 所以一个焊盘都挑不出来。现在用 `pcb_PrimitiveComponent.getAllPinsByPrimitiveId()` 直接拿元件的焊盘，
-删的是端点落在焊盘中心 2 mil 以内、并且和焊盘同层的走线（通孔焊盘各层都算）。
-贴片焊盘正下方另一层的走线连的是那里的过孔，不删。
+再用每个焊盘的 `getConnectedPrimitives()` 让 EDA 判断哪些图元连着它（EDA 的连接检查，铜皮相交就算）。
+原来的写法只认端点落在焊盘中心 2 mil 以内的走线，可真机那块板上通孔焊盘、晶振焊盘、底层大焊盘的走线端点离中心 5 到几十 mil，照那个规则会漏删。
+删的是和焊盘同一网络的直线、圆弧走线；过孔、填充区域、压在焊盘上的别的网络的线都不删。
+连着的走线里有锁定的，直接报错，一条都不删，元件也不动。
+走线先删、元件后移，移动这一步报错时走线已经删掉了。
 `netsToReroute` 只列元件焊盘上的网络，不再混进封装自带过孔的网络。
-查询或删除走线出错时直接报错，不再跳过那个网络接着搬。
 
 同一天核对了 `pcb_get_silkscreens` / `pcb_auto_silkscreen` 读的 getter：
 焊盘取不到外框时，原来拿焊盘图元上不存在的 `getState_Diameter()` / `getState_PadDiameter()` 算避让框，读空之后一律按 10 mil 见方判冲突。
 现在焊盘、过孔、丝印的外框都取 `pcb_Primitive.getPrimitivesBBox()`，取不到就报错并写出图元 ID（真机上 39 个焊盘全都取得到）。
 过孔的 `getState_Diameter()` 是存在的，外框也一并改成这条路。
 丝印条目去掉了 `parentPrimitiveId`：文本图元 `IPCB_PrimitiveString` 没有这个方法，这个字段一直是空串。
-丝印只收顶层、底层丝印（层 3、4）上的文本，原来这两层读不到时会把其他层的文本、甚至整版扫一遍找到的带文字图元当成丝印。
+丝印只收顶层、底层丝印（层 3、4）上的文本，原来这两层读不到时会把所有层的文本都当成丝印。
 读文本、焊盘、过孔出错时直接报错，不再当成「没有」。
 另外核实到：`pcb_PrimitiveString.getAll()` 只给不挂在元件上的文本，元件位号不在里面，这两个工具目前看不到位号。
 这几处的图元对象都标成了类型包里的 `IPCB_*` 类型，再调用不存在的 getter，`npm run build:ext` 的类型检查会直接报错。

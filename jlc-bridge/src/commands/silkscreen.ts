@@ -26,7 +26,9 @@ async function primitiveBox(kind: string, primitiveId: string): Promise<Box> {
     throw new Error('这版 嘉立创EDA 没有 pcb_Primitive.getPrimitivesBBox，算不出丝印和焊盘的外框');
   }
   const box: Box | undefined = await api.pcb_Primitive.getPrimitivesBBox([primitiveId]);
-  if (!box) throw new Error(`${kind} ${primitiveId} 取不到外框`);
+  if (!box || ![box.minX, box.minY, box.maxX, box.maxY].every(Number.isFinite)) {
+    throw new Error(`${kind} ${primitiveId} 取不到外框：${JSON.stringify(box)}`);
+  }
   return box;
 }
 
@@ -83,7 +85,8 @@ async function detectConflicts(silkscreens: any[]): Promise<{
   stats: { totalConflicts: number; byType: Record<string, number> };
   boardBox?: Box;
 }> {
-  const { pads, vias } = await collectAllObstacles();
+  const { pads, vias } =
+    silkscreens.length > 0 ? await collectAllObstacles() : { pads: [], vias: [] };
   const boardBox = await getBoardBoundingBox();
   const perSilk = new Map<string, any[]>();
   const byType: Record<string, number> = {};
