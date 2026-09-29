@@ -185,4 +185,4 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（52 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（53 项）。每条断言都对应一个踩过的坑，别随手删。
