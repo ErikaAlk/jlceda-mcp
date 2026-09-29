@@ -93,6 +93,22 @@ export async function getPCBState(): Promise<any> {
   };
 }
 
+/**
+ * 图元外框（画布坐标，mil），取的是 EDA 自己算的外框：异形焊盘、旋转、文字字形都已经算进去了。
+ * 取不到就报错，免得拿一个猜出来的框去判冲突、挪丝印、认走线。
+ */
+export async function primitiveBox(kind: string, primitiveId: string): Promise<Box> {
+  const api = edaApi();
+  if (!api?.pcb_Primitive?.getPrimitivesBBox) {
+    throw new Error('这版 嘉立创EDA 没有 pcb_Primitive.getPrimitivesBBox，取不到图元外框');
+  }
+  const box: Box | undefined = await api.pcb_Primitive.getPrimitivesBBox([primitiveId]);
+  if (!box || ![box.minX, box.minY, box.maxX, box.maxY].every(Number.isFinite)) {
+    throw new Error(`${kind} ${primitiveId} 取不到外框：${JSON.stringify(box)}`);
+  }
+  return box;
+}
+
 export async function getBBoxOfPrimitive(primitive: any): Promise<Box | undefined> {
   try {
     const bbox = await edaApi()?.pcb_Primitive?.getPrimitivesBBox?.([primitive]);

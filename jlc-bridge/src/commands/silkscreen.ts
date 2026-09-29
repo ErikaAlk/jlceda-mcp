@@ -10,7 +10,7 @@ import {
   toFinite,
   type Box,
 } from './util';
-import { getBoardBoundingBox, getSelectedPrimitiveIdSet } from './pcb-state';
+import { getBoardBoundingBox, getSelectedPrimitiveIdSet, primitiveBox } from './pcb-state';
 
 /** EDA 的层 ID：3 顶层丝印，4 底层丝印 */
 const SILKSCREEN_LAYERS = new Set<number>([3, 4]);
@@ -30,21 +30,6 @@ type SilkRow =
   | { kind: 'attribute'; row: IPCB_PrimitiveAttribute; designator: string };
 
 type SilkMove = { x: number; y: number; rotation?: number };
-
-/**
- * 图元外框（画布坐标，mil）。
- * 丝印和避让目标都用 EDA 自己算的外框：异形焊盘、旋转、文字字形都已经算进去了。
- * 取不到就报错，免得拿一个猜出来的框去判冲突、挪丝印。
- */
-async function primitiveBox(kind: string, primitiveId: string): Promise<Box> {
-  const api = edaApi();
-  if (!api?.pcb_Primitive?.getPrimitivesBBox) {
-    throw new Error('这版 嘉立创EDA 没有 pcb_Primitive.getPrimitivesBBox，算不出丝印和焊盘的外框');
-  }
-  const box: Box | undefined = await api.pcb_Primitive.getPrimitivesBBox([primitiveId]);
-  if (!box) throw new Error(`${kind} ${primitiveId} 取不到外框`);
-  return box;
-}
 
 /** 属性在画布上有没有字。EDA 自己挪属性文字前也是这么判断的（pcb.js 的 modifyAttrPosition） */
 function attributeShowsText(row: IPCB_PrimitiveAttribute): boolean {
@@ -181,7 +166,8 @@ async function detectConflicts(silkscreens: any[]): Promise<{
   stats: { totalConflicts: number; byType: Record<string, number> };
   boardBox?: Box;
 }> {
-  const { pads, vias } = await collectAllObstacles();
+  const { pads, vias } =
+    silkscreens.length > 0 ? await collectAllObstacles() : { pads: [], vias: [] };
   const boardBox = await getBoardBoundingBox();
   const perSilk = new Map<string, any[]>();
   const byType: Record<string, number> = {};

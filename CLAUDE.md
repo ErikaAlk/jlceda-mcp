@@ -153,7 +153,12 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 图元对象标成类型包里的 `IPCB_*` 类型（见 `pcb-state.ts` 的焊盘部分），不存在的 getter 过不了类型检查。
 
 焊盘图元没有位号和父元件 ID。只要某一个元件的焊盘时，用 `pcb_PrimitiveComponent.getAllPinsByPrimitiveId(元件 ID)`，
-它给的是完整图元 ID 和画布坐标（mil），不含封装自带的过孔，元件没有焊盘时返回 `undefined`（见 `relocateComponent()`）。
+它给的是完整图元 ID 和画布坐标（mil），不含封装自带的过孔；元件没有焊盘、或者按这个 ID 找不到元件时返回 `undefined`。
+要知道哪些走线连着某个焊盘，用器件焊盘的 `getConnectedPrimitives()`（见 `relocateComponent()`）：`pcb.js` 里走的是 EDA 的连接检查，
+只看同一网络（`checkTrackPad` 里 `whetherCheckNet` 默认开着），贴片焊盘只看同层、通孔焊盘各层都算，铜皮碰到就算，
+走线端点不在焊盘中心也算。真机上通孔焊盘、大焊盘的走线端点常常离中心 5 到几十 mil，别按坐标去凑。
+从焊盘上横穿过去、两头连着别处的同网络走线它也会返回，要删线时得自己按端点再筛一遍。
+它的参数 `onlyCentreConnection` 只在 `api.js` 里决定要不要带上填充区域，根本没传给 `pcb.js`；类型包 0.1.175 只公开了 `false` 那个重载。
 要给全板焊盘找所属元件时，拿元件的 `getState_Pads()` 反查。那里的 `primitiveId` 是去掉元件 ID 的后缀
 （`pro-pcb/<版本>/js/pcb.js` 序列化元件时写的是 `pad.globalIndex.replace(component.globalIndex, '')`），
 焊盘的完整 ID 要拼成「元件 ID + 后缀」，列表里还混着封装自带的过孔。实现见 `mapPadOwners()`。
@@ -189,4 +194,4 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（55 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（58 项）。每条断言都对应一个踩过的坑，别随手删。
