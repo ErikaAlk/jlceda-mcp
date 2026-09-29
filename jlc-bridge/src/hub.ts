@@ -72,9 +72,9 @@ export interface BridgeHub {
   /** 菜单上一次渲染出来的状态行文字，只有变了才去调 replaceHeaderMenus */
   menuSignature: string;
   /**
-   * 当前活着的那份代码的构建标识。
-   * 装了新版扩展之后，旧的 WebSocket onMessage 闭包还挂在 EDA 那边，
-   * 靠这个字段发现「跑着的是上一版代码」并把连接推倒重来。
+   * 最近一次跑 ensureLink() 的那份代码的构建标识（见 config.ts 的 CODE_BUILD）。
+   * 重新导入扩展之后 hub 里的链路状态还是上一版代码留下的，
+   * 靠这个字段发现这件事并把连接推倒重来。
    */
   codeBuild: string;
   /** 已经装过心跳定时器了吗（防止每次求值都重复装，虽然 sys_Timer 自己也按 ID 去重） */

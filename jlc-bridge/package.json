@@ -5,9 +5,9 @@
   "main": "dist/index.js",
   "scripts": {
     "typecheck": "tsc",
-    "compile": "esbuild src/index.ts --bundle --outfile=dist/index.js --format=iife --platform=browser --global-name=edaEsbuildExportName --target=es2018",
+    "compile": "node build/compile.js",
     "build": "npm run typecheck && npm run compile && node build/pack.js",
-    "watch": "esbuild src/index.ts --bundle --outfile=dist/index.js --format=iife --platform=browser --global-name=edaEsbuildExportName --target=es2018 --watch"
+    "watch": "node build/compile.js --watch"
   },
   "devDependencies": {
     "@jlceda/pro-api-types": "^0.1.175",

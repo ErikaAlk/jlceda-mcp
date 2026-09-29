@@ -42,8 +42,13 @@ Claude Code ⇄(stdio) mcp-server ⇄(ws://127.0.0.1:18800/ws/bridge) JLC MCP �
 所以：**所有跨调用的状态一律挂在 `hub.ts` 的 `globalThis.__JLC_BRIDGE_HUB_V2__` 上**，
 每个导出函数第一件事都是 `boot()`（幂等）。别写 `let connected = false` 这种。
 
-装了新版扩展之后，还活着的 `onMessage` 闭包是**上一版代码**的。
-`link.ts` 靠 `hub.codeBuild !== CODE_BUILD` 发现这件事并推倒重连，让新代码接管。别删。
+在扩展管理器里覆盖导入同 UUID 的扩展时，EDA 先卸载旧的那份（`api.js` 的 `mw()` → `$v()`：清掉它的 `sys_Timer`，
+摘掉 `sys_WebSocket` 的 message / open 监听再关连接），再加载新代码，已登录时紧接着按 `onStartupFinished` 激活（`dw()` → `Ig()`）。
+`globalThis` 上的 hub 不归 EDA 管，原样留着，新代码读到的 `phase` 还是上一版留下的 `online`。
+`link.ts` 靠 `hub.codeBuild !== CODE_BUILD` 发现这件事并推倒重连。别删。
+`CODE_BUILD` 是「版本号+代码哈希」，哈希由 `jlc-bridge/build/compile.js` 在构建时对打包产物取 SHA-256 注入，
+改了代码、版本号不动也会变。哈希必须跟着代码变：新代码认不出 hub 是旧代码留下的，就要等保活 ping 发送失败才重连，
+这几秒里菜单写着「已连接」，Claude 的命令却发不到 EDA。
 
 ## ⚠ 不变量 2：`sys_WebSocket` 没有 close / error 回调
 
@@ -188,9 +193,9 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 ## 常见任务
 
 **改了扩展**：`npm run build:ext` → 在 EDA 里重新导入 `.eext`（同 UUID 会覆盖）→
-点一次菜单「立即重连」→ `npm run live` 验证。菜单第一行的状态灯会自己变。
-`CODE_BUILD` 只取 `extension.json` 的版本号，版本号没变时 `link.ts` 认不出代码更新，
-已经连着的旧 `onMessage` 闭包会接着用旧代码处理命令；「立即重连」会关掉旧连接，用新代码重新注册。
+`npm run live` 验证。菜单第一行的状态灯会自己变。
+新代码激活时发现构建标识变了会自己重连，运行日志里记一条「检测到扩展代码已更新」。
+没登录时 EDA 导入后不激活扩展，要点一下任意菜单项，新代码才开始跑。
 
 **改了 MCP server**：`npm run build` → **重启 Claude Code**（MCP 进程不会热重载）。
 
@@ -201,4 +206,4 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（63 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（64 项）。每条断言都对应一个踩过的坑，别随手删。

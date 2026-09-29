@@ -5,12 +5,15 @@ import { readConfig, writeConfig } from './eda';
 export const APP_NAME = String((extensionConfig as any).displayName || 'JLC MCP');
 export const APP_VERSION = String((extensionConfig as any).version || '0.0.0');
 
+/** 构建时由 build/compile.js 注入：打包产物的 SHA-256 前 12 位 */
+declare const __CODE_HASH__: string;
+
 /**
- * 这份代码的构建标识。版本号变了就变。
- * 用途见 link.ts：装了新扩展之后，EDA 那边还挂着旧版代码的回调闭包，
- * 靠它发现「现在跑的不是最新代码」并强制重连。
+ * 这份代码的构建标识：版本号+代码哈希。改了代码，版本号不动它也会变；源码不变时重新构建，它不变。
+ * 用途见 link.ts：重新导入扩展之后，globalThis 上的 hub 还是上一版代码留下的，
+ * 靠它发现这件事并推倒重连。
  */
-export const CODE_BUILD = `${APP_VERSION}`;
+export const CODE_BUILD = `${APP_VERSION}+${__CODE_HASH__}`;
 
 export const HEADER_MENUS = (extensionConfig as any).headerMenus;
 

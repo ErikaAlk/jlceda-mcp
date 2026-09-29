@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 63 项自动化测试
+npm test              # 64 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -141,6 +141,16 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 
 ### 未发布
 
+**2026-09-29** 改了扩展代码、版本号没变时，在 EDA 里重新导入 `.eext` 之后，菜单还会写着「已连接」一段时间，这期间 Claude 的命令发不到 EDA。
+EDA 覆盖导入同 UUID 的扩展时先卸载旧的那份，清掉它的定时器、关掉它的连接，再用新代码激活扩展；
+扩展挂在 `globalThis` 上的链路状态却还在，新代码读到的还是「已连接」，要等下一次保活 ping 发送失败才重连。
+扩展靠构建标识 `CODE_BUILD` 认出这份状态是上一版代码留下的，而它原来只取 `extension.json` 的版本号，版本号不变就认不出来。
+现在 `CODE_BUILD` 是「版本号+代码哈希」：`npm run build:ext` 先把哈希留空打包一遍，对产物取 SHA-256 前 12 位，再把哈希注入正式打包。
+改了代码哈希就变，源码没变时重新构建哈希不变，`npm --prefix jlc-bridge run watch` 也一样注入哈希。
+新代码激活时发现构建标识变了，立即关掉旧连接、重新连接，运行日志里记一条「检测到扩展代码已更新」。
+EDA 没登录时导入后不会激活扩展，要点一下任意菜单项新代码才开始跑。
+改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
+
 **2026-09-29** `pcb_auto_silkscreen` 给候选位置打分时，把丝印的 `x`、`y` 当成外框中心画框，换角度时当成绕中心转。
 EDA 里文本和元件属性的坐标是对齐锚点（对齐方式有 9 种，只有居中对齐时锚点才在外框中心），字也是绕锚点转的，
 冲突检测用的却是 EDA 给的真实外框。锚点不在外框中心时，原位没压焊盘的丝印会被挪走，挪完的位置在 EDA 里可能还压着焊盘。
@@ -149,8 +159,7 @@ EDA 里文本和元件属性的坐标是对齐锚点（对齐方式有 9 种，�
 绕锚点转的方向和不翻转的字相反。原角度或角度差是 90° 的整数倍时，候选框和 EDA 的外框一致；
 两者都不是时候选框只会偏大，字越细长偏得越多（斜 45° 的 40×10 的字转到 0° 算成 50×50），这种丝印换角度的候选容易被判成冲突，多半只会平移。
 丝印条目多了 `mirror`（是否勾了镜像）。
-改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext`，再点一次菜单「JLC MCP → 立即重连」才生效：
-扩展版本号没变，已经连着的旧连接认不出代码更新，会接着用旧代码处理命令。
+改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
 
 **2026-09-29** `pcb_get_silkscreens` 查不出元件位号，`pcb_auto_silkscreen` 因此从来没挪过位号。
 扩展只读 `pcb_PrimitiveString.getAll()`，EDA 的 `pcb.js` 在这个接口里按 `!getParent()` 过滤，只给不挂在元件上的文本；
