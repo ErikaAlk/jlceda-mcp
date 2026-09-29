@@ -825,25 +825,59 @@ test('搬迁元件时删掉连到它焊盘上的走线，别的走线不动', { 
 //
 // 元件位号、值这些挂在元件上的文字是属性图元 IPCB_PrimitiveAttribute。pcb_PrimitiveString.getAll() 不给它们
 // （pcb.js 里按 !getParent() 过滤了），原来只读文本，真机上一块摆满元件的板查出来 0 条丝印，位号从来没被挪过。
+//
+// 写回也照 api.js 造：getAll 给的对象处在异步模式，setState_* 只改对象上的值，done() 才把整个对象发给 EDA，
+// EDA 拒绝时 done() 抛「对象参数不正确，无法应用到画布」。pcb_PrimitiveString.modify / pcb_PrimitiveAttribute.modify
+// 调 done() 时没有 await，EDA 拒绝写入也照样返回对象。
 
-function pcbString({ id, text, x, y, layer }) {
-  return {
-    getState_PrimitiveType: () => 'String',
-    getState_PrimitiveId: () => id,
-    getState_Layer: () => layer,
-    getState_X: () => x,
-    getState_Y: () => y,
-    getState_Text: () => text,
-    getState_FontFamily: () => 'default',
-    getState_FontSize: () => 16,
-    getState_LineWidth: () => 2,
-    getState_AlignMode: () => 5,
-    getState_Rotation: () => 0,
-    getState_Reverse: () => false,
-    getState_Expansion: () => 0,
-    getState_Mirror: () => false,
-    getState_PrimitiveLock: () => false,
-  };
+/** 给图元对象装上写回用的方法（都是 api-types.d.ts 里有的），write(obj) 由板子的 mock 提供 */
+function writable(obj, state, write) {
+  return Object.assign(obj, {
+    setState_X: (x) => ((state.x = x), obj),
+    setState_Y: (y) => ((state.y = y), obj),
+    setState_Rotation: (rotation) => ((state.rotation = rotation), obj),
+    isAsync: () => state.async,
+    toAsync: () => ((state.async = true), obj),
+    done: async () => {
+      await write(obj);
+      return obj;
+    },
+  });
+}
+
+/** 照 api.js 的 modify：改完字段调 done() 却不 await，直接把对象返回 */
+function edaModify(row, property) {
+  row.isAsync() || row.toAsync();
+  if (property.x !== undefined) row.setState_X(property.x);
+  if (property.y !== undefined) row.setState_Y(property.y);
+  if (property.rotation !== undefined) row.setState_Rotation(property.rotation);
+  row.done();
+  return row;
+}
+
+function pcbString({ id, text, x, y, layer, write }) {
+  const state = { x, y, rotation: 0, async: true };
+  return writable(
+    {
+      getState_PrimitiveType: () => 'String',
+      getState_PrimitiveId: () => id,
+      getState_Layer: () => layer,
+      getState_X: () => state.x,
+      getState_Y: () => state.y,
+      getState_Text: () => text,
+      getState_FontFamily: () => 'default',
+      getState_FontSize: () => 16,
+      getState_LineWidth: () => 2,
+      getState_AlignMode: () => 5,
+      getState_Rotation: () => state.rotation,
+      getState_Reverse: () => false,
+      getState_Expansion: () => 0,
+      getState_Mirror: () => false,
+      getState_PrimitiveLock: () => false,
+    },
+    state,
+    write,
+  );
 }
 
 function pcbVia({ id, net, x, y, diameter }) {
@@ -862,51 +896,60 @@ function pcbVia({ id, net, x, y, diameter }) {
   };
 }
 
-/** IPCB_PrimitiveAttribute 的全部 getter。坐标单位 mil（api.js 里是画布坐标 × 10） */
-function pcbAttribute({ id, parentId, key, value, keyVisible = false, valueVisible, x, y, layer }) {
-  return {
-    getState_PrimitiveType: () => 'Attribute',
-    getState_PrimitiveId: () => id,
-    getState_ParentPrimitiveId: () => parentId,
-    getState_Layer: () => layer,
-    getState_X: () => x,
-    getState_Y: () => y,
-    getState_Key: () => key,
-    getState_Value: () => value,
-    getState_KeyVisible: () => keyVisible,
-    getState_ValueVisible: () => valueVisible,
-    getState_FontFamily: () => 'default',
-    getState_FontSize: () => 12,
-    getState_LineWidth: () => 2,
-    getState_AlignMode: () => 5,
-    getState_Rotation: () => 0,
-    getState_Reverse: () => false,
-    getState_Expansion: () => 0,
-    getState_Mirror: () => false,
-    getState_PrimitiveLock: () => false,
-  };
+/** IPCB_PrimitiveAttribute 的全部 getter 加写回用的方法。坐标单位 mil（api.js 里是画布坐标 × 10） */
+function pcbAttribute({ id, parentId, key, value, keyVisible = false, valueVisible, x, y, layer, write }) {
+  const state = { x, y, rotation: 0, async: true };
+  return writable(
+    {
+      getState_PrimitiveType: () => 'Attribute',
+      getState_PrimitiveId: () => id,
+      getState_ParentPrimitiveId: () => parentId,
+      getState_Layer: () => layer,
+      getState_X: () => state.x,
+      getState_Y: () => state.y,
+      getState_Key: () => key,
+      getState_Value: () => value,
+      getState_KeyVisible: () => keyVisible,
+      getState_ValueVisible: () => valueVisible,
+      getState_FontFamily: () => 'default',
+      getState_FontSize: () => 12,
+      getState_LineWidth: () => 2,
+      getState_AlignMode: () => 5,
+      getState_Rotation: () => state.rotation,
+      getState_Reverse: () => false,
+      getState_Expansion: () => 0,
+      getState_Mirror: () => false,
+      getState_PrimitiveLock: () => false,
+    },
+    state,
+    write,
+  );
 }
 
 // EDA 给每个元件挂一整串属性（Designator、Value、Footprint……），多数是隐藏的。
 // 隐藏的属性可能没有摆放位置，这时 pcb.js 把位置记成原点，api.js 给出来的坐标是 (0, 0)。
-// 不该收进来的属性都不给外框：收进来就会当场报「取不到外框」。
+// 这里不该收进来的属性都不给外框，误收进来时测试会因为「取不到外框」失败
+// （真机上隐藏属性的外框是退化成一个点的框，不会报错）。
 const SILK_ATTRIBUTES = [
   // R1 的位号，压在 pad1 上
-  pcbAttribute({ id: 'a1', parentId: 'c1', key: 'Designator', value: 'R1', valueVisible: true, x: 440, y: 290, layer: 3 }),
-  pcbAttribute({ id: 'a2', parentId: 'c1', key: 'Value', value: '10k', valueVisible: false, x: 0, y: 0, layer: 3 }),
-  pcbAttribute({ id: 'a3', parentId: 'c1', key: 'Footprint', value: 'R0603', valueVisible: false, x: 0, y: 0, layer: 3 }),
+  { id: 'a1', parentId: 'c1', key: 'Designator', value: 'R1', valueVisible: true, x: 440, y: 290, layer: 3 },
+  { id: 'a2', parentId: 'c1', key: 'Value', value: '10k', valueVisible: false, x: 0, y: 0, layer: 3 },
+  { id: 'a3', parentId: 'c1', key: 'Footprint', value: 'R0603', valueVisible: false, x: 0, y: 0, layer: 3 },
   // C1 的位号在底层丝印，周围空着
-  pcbAttribute({ id: 'a4', parentId: 'c2', key: 'Designator', value: 'C1', valueVisible: true, x: 700, y: 700, layer: 4 }),
+  { id: 'a4', parentId: 'c2', key: 'Designator', value: 'C1', valueVisible: true, x: 700, y: 700, layer: 4 },
   // 显示着，但在顶层装配层（9），不是丝印
-  pcbAttribute({ id: 'a5', parentId: 'c2', key: 'Value', value: '100nF', valueVisible: true, x: 700, y: 720, layer: 9 }),
+  { id: 'a5', parentId: 'c2', key: 'Value', value: '100nF', valueVisible: true, x: 700, y: 720, layer: 9 },
   // 勾了显示但值是空的，画布上一个字都没有
-  pcbAttribute({ id: 'a6', parentId: 'c2', key: 'Manufacturer Part', value: '', valueVisible: true, x: 700, y: 740, layer: 4 }),
+  { id: 'a6', parentId: 'c2', key: 'Manufacturer Part', value: '', valueVisible: true, x: 700, y: 740, layer: 4 },
   // Key 和 Value 都显示
-  pcbAttribute({ id: 'a7', parentId: 'c1', key: 'Tolerance', value: '1%', keyVisible: true, valueVisible: true, x: 600, y: 500, layer: 3 }),
+  { id: 'a7', parentId: 'c1', key: 'Tolerance', value: '1%', keyVisible: true, valueVisible: true, x: 600, y: 500, layer: 3 },
 ];
 
-/** withoutBox：让 getPrimitivesBBox 对这个图元给 undefined；attributes：元件挂着的属性 */
-function silkBoardMock({ withoutBox, attributes = [] } = {}) {
+/**
+ * withoutBox：让 getPrimitivesBBox 对这个图元给 undefined；
+ * attributes：元件挂着的属性（pcbAttribute 的参数）；rejectWrite：EDA 拒绝写回这个图元
+ */
+function silkBoardMock({ withoutBox, attributes = [], rejectWrite } = {}) {
   const boxes = {
     outline: { minX: 0, minY: 0, maxX: 1000, maxY: 1000 },
     // 80×50 的大焊盘，中心 (440, 305)
@@ -922,46 +965,61 @@ function silkBoardMock({ withoutBox, attributes = [] } = {}) {
   };
   delete boxes[withoutBox];
 
+  // EDA 收到的写回。done() 发出去的是整个对象，这里记下坐标和角度
+  const writes = [];
+  const write = async (obj) => {
+    const id = obj.getState_PrimitiveId();
+    // api.js 的 done()：EDA 的 modify 请求回了假值就抛这句
+    if (id === rejectWrite) throw new Error('错误：对象参数不正确，无法应用到画布。');
+    writes.push({
+      id,
+      type: obj.getState_PrimitiveType(),
+      x: obj.getState_X(),
+      y: obj.getState_Y(),
+      rotation: obj.getState_Rotation(),
+    });
+  };
+
   const strings = [
-    pcbString({ id: 's1', text: 'R1', x: 474, y: 334, layer: 3 }),
-    pcbString({ id: 's2', text: 'GND', x: 200, y: 215, layer: 4 }),
+    pcbString({ id: 's1', text: 'R1', x: 474, y: 334, layer: 3, write }),
+    pcbString({ id: 's2', text: 'GND', x: 200, y: 215, layer: 4, write }),
     // 顶层铜皮上的文字，不是丝印
-    pcbString({ id: 's3', text: 'NOTE', x: 440, y: 305, layer: 1 }),
+    pcbString({ id: 's3', text: 'NOTE', x: 440, y: 305, layer: 1, write }),
   ];
+  const attributeRows = attributes.map((spec) => pcbAttribute({ ...spec, write }));
   const components = [
     pcbComponent({ id: 'c1', designator: 'R1', x: 440, y: 305, pads: [] }),
     pcbComponent({ id: 'c2', designator: 'C1', x: 700, y: 720, pads: [] }),
+    // 没有位号的元件
+    pcbComponent({ id: 'c3', designator: undefined, x: 50, y: 50, pads: [] }),
   ];
-  const moved = [];
-  const movedAttributes = [];
   return {
-    moved,
-    movedAttributes,
+    writes,
     api: {
       pcb_Primitive: { getPrimitivesBBox: bboxLookup(boxes) },
       pcb_PrimitiveString: {
         getAll: async (layer) => strings.filter((s) => layer === undefined || s.getState_Layer() === layer),
-        // api.js 按 ID 取不到文本时返回 undefined
         modify: async (id, property) => {
-          moved.push({ id, property });
-          return strings.find((s) => s.getState_PrimitiveId() === id);
+          const row = strings.find((s) => s.getState_PrimitiveId() === id);
+          // api.js 按 ID 取不到文本时返回 undefined
+          if (!row) return undefined;
+          return edaModify(row, property);
         },
       },
       pcb_PrimitiveAttribute: {
         // 照 api.js：摊平全部元件的属性，再按父图元、层、锁定过滤
         getAll: async (parentPrimitiveId, layer, primitiveLock) =>
-          attributes.filter(
+          attributeRows.filter(
             (a) =>
               (parentPrimitiveId === undefined || a.getState_ParentPrimitiveId() === parentPrimitiveId) &&
               (layer === undefined || a.getState_Layer() === layer) &&
               (primitiveLock === undefined || a.getState_PrimitiveLock() === primitiveLock),
           ),
         modify: async (id, property) => {
-          const row = attributes.find((a) => a.getState_PrimitiveId() === id);
+          const row = attributeRows.find((a) => a.getState_PrimitiveId() === id);
           // api.js 按 ID 取不到属性时拿到的是空数组，接着调 isAsync() 就抛了
           if (!row) throw new TypeError('t.isAsync is not a function');
-          movedAttributes.push({ id, property });
-          return row;
+          return edaModify(row, property);
         },
       },
       pcb_PrimitiveComponent: { getAll: async () => components },
@@ -1012,7 +1070,7 @@ test('丝印冲突按真实 getter 和 EDA 外框判定，只收丝印层上的�
 
   const auto = await runCommand(runtime, state, 'auto_silkscreen');
   assert.equal(auto.ok, true, auto.error);
-  assert.deepEqual(m.moved.map((mv) => mv.id).sort(), ['s1', 's2']);
+  assert.deepEqual(m.writes.map((w) => w.id).sort(), ['s1', 's2']);
   for (const d of auto.data.details) assert.equal(d.to.score, 0, `${d.primitiveId} 挪完还压着东西`);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
@@ -1033,7 +1091,7 @@ test('焊盘或过孔取不到外框时直接报错，不许拿猜的框去判�
   }
 });
 
-test('位号这类元件属性也算丝印，带上所属元件，自动避让时走 pcb_PrimitiveAttribute.modify', { skip }, async () => {
+test('位号这类元件属性也算丝印，带上所属元件，自动避让时写回属性图元', { skip }, async () => {
   const m = silkBoardMock({ attributes: SILK_ATTRIBUTES });
   const { runtime, state } = boot({ extraApi: m.api });
   await runtime.call('activate', 'onStartupFinished');
@@ -1070,15 +1128,22 @@ test('位号这类元件属性也算丝印，带上所属元件，自动避让�
 
   const auto = await runCommand(runtime, state, 'auto_silkscreen');
   assert.equal(auto.ok, true, auto.error);
-  assert.deepEqual(m.movedAttributes.map((mv) => mv.id), ['a1'], '压着焊盘的位号要挪，走属性的 modify');
-  assert.deepEqual(m.moved.map((mv) => mv.id).sort(), ['s1', 's2'], '属性不能拿去调文本的 modify');
+  assert.deepEqual(
+    m.writes.filter((w) => w.type === 'Attribute').map((w) => w.id),
+    ['a1'],
+    '压着焊盘的位号要挪，写回的是属性图元',
+  );
+  assert.deepEqual(
+    m.writes.filter((w) => w.type === 'String').map((w) => w.id).sort(),
+    ['s1', 's2'],
+  );
   const a1Detail = auto.data.details.find((d) => d.primitiveId === 'a1');
   assert.equal(a1Detail.designator, 'R1');
   assert.equal(a1Detail.to.score, 0, 'a1 挪完还压着东西');
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
-test('pcb_move_silkscreen 按 primitiveId 分辨属性和文本，各走各的 modify', { skip }, async () => {
+test('pcb_move_silkscreen 按 primitiveId 分辨属性和文本，写回对应的图元', { skip }, async () => {
   const m = silkBoardMock({ attributes: SILK_ATTRIBUTES });
   const { runtime, state } = boot({ extraApi: m.api });
   await runtime.call('activate', 'onStartupFinished');
@@ -1086,13 +1151,12 @@ test('pcb_move_silkscreen 按 primitiveId 分辨属性和文本，各走各的 m
   const attr = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 'a1', x: 440, y: 250, rotation: 90 });
   assert.equal(attr.ok, true, attr.error);
   assert.equal(attr.data.kind, 'attribute');
-  assert.deepEqual(m.movedAttributes, [{ id: 'a1', property: { x: 440, y: 250, rotation: 90 } }]);
-  assert.deepEqual(m.moved, [], '属性不能拿去调文本的 modify');
+  assert.deepEqual(m.writes, [{ id: 'a1', type: 'Attribute', x: 440, y: 250, rotation: 90 }]);
 
   const str = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 's1', x: 500, y: 400 });
   assert.equal(str.ok, true, str.error);
   assert.equal(str.data.kind, 'string');
-  assert.deepEqual(m.moved, [{ id: 's1', property: { x: 500, y: 400 } }]);
+  assert.deepEqual(m.writes[1], { id: 's1', type: 'String', x: 500, y: 400, rotation: 0 }, '没传角度就不动角度');
 
   const missing = await runCommand(runtime, state, 'move_silkscreen', { primitiveId: 'nope', x: 0, y: 0 });
   assert.equal(missing.ok, false, '找不到的图元不许报成功');
@@ -1110,6 +1174,41 @@ test('丝印层上的属性取不到外框时直接报错并写出位号', { ski
   assert.match(reply.error, /R1/);
   assert.match(reply.error, /a1 取不到外框/);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('EDA 拒绝写回丝印时，挪动和自动避让都要报错，不许报成功', { skip }, async () => {
+  // pcb_PrimitiveAttribute.modify 调 done() 不 await：EDA 拒绝写入时它照样返回对象，
+  // 原来的代码因此把没挪成的位号报成挪好了。
+  for (const [action, params] of [
+    ['move_silkscreen', { primitiveId: 'a1', x: 440, y: 250 }],
+    ['auto_silkscreen', {}],
+  ]) {
+    const m = silkBoardMock({ attributes: SILK_ATTRIBUTES, rejectWrite: 'a1' });
+    const { runtime, state } = boot({ extraApi: m.api });
+    await runtime.call('activate', 'onStartupFinished');
+
+    const reply = await runCommand(runtime, state, action, params);
+    assert.equal(reply.ok, false, `${action}：EDA 没写进去却报了成功`);
+    assert.match(reply.error, /无法应用到画布/);
+    delete globalThis.__JLC_BRIDGE_HUB_V2__;
+  }
+});
+
+test('丝印层上的属性认不出所属元件、元件没有位号、显示着却没有坐标时直接报错', { skip }, async () => {
+  for (const [extra, pattern] of [
+    [{ id: 'a8', parentId: 'ghost', key: 'Designator', value: 'X9', valueVisible: true, x: 100, y: 100, layer: 3 }, /ghost 不在元件列表里/],
+    [{ id: 'a9', parentId: 'c3', key: 'Value', value: '4.7k', valueVisible: true, x: 60, y: 60, layer: 3 }, /c3 没有位号/],
+    [{ id: 'a10', parentId: 'c1', key: 'Comment', value: 'DNP', valueVisible: true, x: null, y: null, layer: 3 }, /没有坐标/],
+  ]) {
+    const m = silkBoardMock({ attributes: [...SILK_ATTRIBUTES, extra] });
+    const { runtime, state } = boot({ extraApi: m.api });
+    await runtime.call('activate', 'onStartupFinished');
+
+    const reply = await runCommand(runtime, state, 'get_silkscreens');
+    assert.equal(reply.ok, false, `${extra.id} 的数据对不上，不该给出一份丝印列表`);
+    assert.match(reply.error, pattern);
+    delete globalThis.__JLC_BRIDGE_HUB_V2__;
+  }
 });
 
 // ─── 原理图 ───

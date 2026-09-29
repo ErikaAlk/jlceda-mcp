@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 52 项自动化测试
+npm test              # 54 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -147,11 +147,16 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 现在顶层、底层丝印上显示出字的元件属性也一并收进来。每条丝印多了 `kind`：`string` 是文本，`attribute` 是元件属性；
 属性条目另有 `key`、`value`、`parentPrimitiveId` 和所属元件的 `designator`，`text` 是画布上显示的字（Key、Value 都显示时是 `Key:Value`）。
 隐藏的属性、不在丝印层的属性、勾了显示但没有字的属性都不收。
-属性的外框同样取 `pcb_Primitive.getPrimitivesBBox()`，取不到就报错并写出位号。
-自动避让挪属性时走 `pcb_PrimitiveAttribute.modify`，文本仍走 `pcb_PrimitiveString.modify`，`details` 里属性条目带所属元件位号。
-`pcb_move_silkscreen` 按 `primitiveId` 认出是文本还是元件属性，各走各的 modify，返回里带 `kind`。
+属性的外框同样取 `pcb_Primitive.getPrimitivesBBox()`，取不到就报错并写出位号；属性所属的元件没有位号时也直接报错。
+挪动时文本和属性各自写回自己的图元：改完坐标直接 await 图元对象的 `done()`。
+`pcb_PrimitiveString.modify` / `pcb_PrimitiveAttribute.modify` 在 `api.js` 里调 `done()` 时没有 await，
+EDA 拒绝写入时报的「对象参数不正确，无法应用到画布」没人接，调用方照样拿到成功；
+`done()` 发的是同一个 modify 请求，现在写入失败会直接报错。
+自动避让的 `details` 里属性条目带所属元件位号。
+`pcb_move_silkscreen` 按 `primitiveId` 认出是文本还是元件属性，返回里带 `kind`。
 两种都找不到时直接报错：原来不管什么 ID 都交给文本的 modify，EDA 找不到这个图元时也照样报成功。
-`pcb_get_feature_support` 的 `silkscreen.query` / `silkscreen.modify` 改为文本和属性两种接口都在才算支持。
+`pcb_get_feature_support` 的 `silkscreen.query` 改为文本、属性、元件查询和 `getPrimitivesBBox` 都在才算支持，
+`silkscreen.modify` 改为文本和属性查询都在才算支持。
 改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
 
 **2026-09-29** `pcb_relocate_component` 的自动断线从来没删过走线，返回的 `deletedTracks` 恒为空。

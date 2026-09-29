@@ -592,10 +592,16 @@ export async function getFeatureSupport(): Promise<any> {
       renderedAreaImage: Boolean(api?.dmt_EditorControl?.getCurrentRenderedAreaImage),
       exportImage: Boolean(api?.pcb_Document?.exportImage),
     },
-    // 丝印包括文本和元件属性（位号等），两种图元都要能查、能改
+    // 丝印包括文本和元件属性（位号等）。查询还要靠元件列表认属性的归属、靠 getPrimitivesBBox 取外框；
+    // 挪动是取到图元对象后 await 它的 done()（见 silkscreen.ts 的 writeMove），有两个 getAll 就够
     silkscreen: {
-      query: Boolean(api?.pcb_PrimitiveString?.getAll && api?.pcb_PrimitiveAttribute?.getAll),
-      modify: Boolean(api?.pcb_PrimitiveString?.modify && api?.pcb_PrimitiveAttribute?.modify),
+      query: Boolean(
+        api?.pcb_PrimitiveString?.getAll &&
+          api?.pcb_PrimitiveAttribute?.getAll &&
+          api?.pcb_PrimitiveComponent?.getAll &&
+          api?.pcb_Primitive?.getPrimitivesBBox,
+      ),
+      modify: Boolean(api?.pcb_PrimitiveString?.getAll && api?.pcb_PrimitiveAttribute?.getAll),
     },
     via: {
       create: Boolean(api?.pcb_PrimitiveVia?.create),

@@ -160,10 +160,15 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 
 丝印上的字有两种图元。`pcb_PrimitiveString.getAll()` 只给不挂在元件上的文本（`pcb.js` 里按 `!getParent()` 过滤了），
 文本图元没有父图元 ID 的 getter。位号、值这些挂在元件上的字是属性图元 `IPCB_PrimitiveAttribute`，
-从 `pcb_PrimitiveAttribute.getAll()` 取，挪位置走 `pcb_PrimitiveAttribute.modify`。
+从 `pcb_PrimitiveAttribute.getAll()` 取。
 这个列表里是全部元件的全部属性，多数是隐藏的（Key、Value 都不显示），隐藏属性可能没有摆放位置，这时坐标给的是原点，
 所以只收丝印层（3、4）上显示出字的属性，判断条件照 `pcb.js` 的 `modifyAttrPosition`（见 `silkscreen.ts`）。
 `pcb_PrimitiveAttribute.get(单个 ID)` 查不到时返回空数组（类型声明写的是 `undefined`），按 ID 分辨文本和属性要到两个 `getAll()` 里找。
+
+`api.js` 里各图元类的 `modify()`（文本、属性、元件等 15 处）调 `done()` 时没有 await：
+EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画布」没人接，`modify()` 照样返回图元对象。
+要让写入失败报出来，取到图元对象、`setState_*` 之后 await 它的 `done()`（见 `silkscreen.ts` 的 `writeMove()`）。
+类型包把 `done()` 当作 @beta 成员裁掉了，用到的声明补在 `jlc-bridge/src/eda-beta.d.ts`。
 
 运行中的 EDA 加载的是哪一版 `pcb.js` / `api.js`，看 `assets/pro-versions/<版本>/editor.ini`。
 
@@ -183,4 +188,4 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（52 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（54 项）。每条断言都对应一个踩过的坑，别随手删。
