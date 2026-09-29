@@ -152,9 +152,15 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 读之前先对一遍。按猜的方法名读不会报错，只会静默拿到空值：线宽、元件宽高、焊盘位号都栽在这上面。
 图元对象标成类型包里的 `IPCB_*` 类型（见 `pcb-state.ts` 的焊盘部分），不存在的 getter 过不了类型检查。
 
-焊盘图元没有位号和父元件 ID，只能拿元件的 `getState_Pads()` 反查。那里的 `primitiveId` 是去掉元件 ID 的后缀
+焊盘图元没有位号和父元件 ID。只要某一个元件的焊盘时，用 `pcb_PrimitiveComponent.getAllPinsByPrimitiveId(元件 ID)`，
+它给的是完整图元 ID 和画布坐标（mil），不含封装自带的过孔，元件没有焊盘时返回 `undefined`（见 `relocateComponent()`）。
+要给全板焊盘找所属元件时，拿元件的 `getState_Pads()` 反查。那里的 `primitiveId` 是去掉元件 ID 的后缀
 （`pro-pcb/<版本>/js/pcb.js` 序列化元件时写的是 `pad.globalIndex.replace(component.globalIndex, '')`），
 焊盘的完整 ID 要拼成「元件 ID + 后缀」，列表里还混着封装自带的过孔。实现见 `mapPadOwners()`。
+
+`pcb_PrimitiveString.getAll()` 只给不挂在元件上的文本（`pcb.js` 里按 `!getParent()` 过滤了），元件位号不在里面，
+所以 `pcb_get_silkscreens` / `pcb_auto_silkscreen` 目前看不到位号，真机上一块摆满元件的板查出来是 0 条。
+文本图元也没有父图元 ID 的 getter。
 
 运行中的 EDA 加载的是哪一版 `pcb.js` / `api.js`，看 `assets/pro-versions/<版本>/editor.ini`。
 
@@ -174,4 +180,4 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（46 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（49 项）。每条断言都对应一个踩过的坑，别随手删。

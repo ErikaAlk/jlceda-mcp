@@ -46,19 +46,6 @@ export function readFirstNumberValue(target: any, getterNames: string[]): number
   return undefined;
 }
 
-export function readFirstBooleanValue(target: any, getterNames: string[]): boolean | undefined {
-  for (const getterName of getterNames) {
-    try {
-      const getter = target?.[getterName];
-      if (typeof getter !== 'function') continue;
-      return Boolean(getter.call(target));
-    } catch {
-      /* 试下一个 */
-    }
-  }
-  return undefined;
-}
-
 export function normalizeAngle(angle: number): number {
   let value = toFinite(angle, 0);
   while (value <= -180) value += 360;
@@ -75,22 +62,6 @@ export function createBoxFromCenter(x: number, y: number, width: number, height:
   const halfW = Math.max(0, toFinite(width, 0) / 2);
   const halfH = Math.max(0, toFinite(height, 0) / 2);
   return { minX: x - halfW, minY: y - halfH, maxX: x + halfW, maxY: y + halfH };
-}
-
-export function estimateStringBox(
-  x: number,
-  y: number,
-  text: string,
-  fontSize: number,
-  rotation: number,
-): Box {
-  const content = String(text || '');
-  const size = Math.max(1, toFinite(fontSize, 10));
-  const estimatedWidth = Math.max(size * Math.max(content.length, 1) * 0.6, size * 0.8);
-  const estimatedHeight = Math.max(size, 1);
-  const width = isVerticalAngle(rotation) ? estimatedHeight : estimatedWidth;
-  const height = isVerticalAngle(rotation) ? estimatedWidth : estimatedHeight;
-  return createBoxFromCenter(x, y, width, height);
 }
 
 export function boxIntersects(a: Box, b: Box, tolerance = 0): boolean {

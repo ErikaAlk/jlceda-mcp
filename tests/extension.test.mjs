@@ -461,25 +461,12 @@ test('元件宽高取自 getPrimitivesBBox，器件图元没有 getState_Width/H
     u1: { minX: 80, minY: 170, maxX: 140, maxY: 210 },
     r1: { minX: 295, minY: 390, maxX: 305, maxY: 420 },
   };
-  // 照 api.js 的实现：传进来的图元对象先换成 ID；一个图元回它自己的外框，多个回合并外框
-  const getPrimitivesBBox = async (items) => {
-    const hit = items
-      .map((item) => boxes[typeof item === 'string' ? item : item.getState_PrimitiveId()])
-      .filter(Boolean);
-    if (hit.length === 0) return undefined;
-    return {
-      minX: Math.min(...hit.map((b) => b.minX)),
-      minY: Math.min(...hit.map((b) => b.minY)),
-      maxX: Math.max(...hit.map((b) => b.maxX)),
-      maxY: Math.max(...hit.map((b) => b.maxY)),
-    };
-  };
   const { runtime, state } = boot({
     extraApi: {
       pcb_PrimitiveComponent: {
         getAll: async () => [component('u1', 'U1', 100, 200), component('r1', 'R1', 300, 400)],
       },
-      pcb_Primitive: { getPrimitivesBBox },
+      pcb_Primitive: { getPrimitivesBBox: bboxLookup(boxes) },
     },
   });
   await runtime.call('activate', 'onStartupFinished');
@@ -694,6 +681,282 @@ test('元件的焊盘 ID 拼不出任何焊盘时直接报错，不许退回位�
   assert.equal(reply.ok, false);
   assert.match(reply.error, /对不上/);
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+/** 照 api.js 的实现：传进来的图元对象先换成 ID；一个图元回它自己的外框，多个回合并外框，一个都没有回 undefined */
+function bboxLookup(boxes) {
+  return async (items) => {
+    const hit = items
+      .map((item) => boxes[typeof item === 'string' ? item : item.getState_PrimitiveId()])
+      .filter(Boolean);
+    if (hit.length === 0) return undefined;
+    return {
+      minX: Math.min(...hit.map((b) => b.minX)),
+      minY: Math.min(...hit.map((b) => b.minY)),
+      maxX: Math.max(...hit.map((b) => b.maxX)),
+      maxY: Math.max(...hit.map((b) => b.maxY)),
+    };
+  };
+}
+
+// ─── 搬迁元件 ───
+//
+// 器件焊盘和导线也照 api-types.d.ts 逐个 getter 造。原来的 relocateComponent 在 pcb_PrimitivePad.getAll()
+// 的焊盘上读 getState_Designator / getState_ParentPrimitiveId 这类不存在的 getter 去认「哪些焊盘是这个元件的」，
+// 一个都认不出来，pcb_relocate_component 的自动断线从来没删过任何走线。
+
+/** IPCB_PrimitiveComponentPad：焊盘图元的全部 getter，外加父器件 ID */
+function pcbComponentPad(parentId, options) {
+  return {
+    ...pcbPad(options),
+    getState_PrimitiveType: () => 'ComponentPad',
+    getState_ParentComponentPrimitiveId: () => parentId,
+  };
+}
+
+function pcbLine({ id, net, from, to, layer = 1 }) {
+  return {
+    getState_PrimitiveType: () => 'Line',
+    getState_PrimitiveId: () => id,
+    getState_Net: () => net,
+    getState_Layer: () => layer,
+    getState_StartX: () => from[0],
+    getState_StartY: () => from[1],
+    getState_EndX: () => to[0],
+    getState_EndY: () => to[1],
+    getState_LineWidth: () => 10,
+    getState_PrimitiveLock: () => false,
+  };
+}
+
+test('搬迁元件时删掉连到它焊盘上的走线，别的走线不动', { skip }, async () => {
+  const R1 = '240bc228c1ee3a49';
+  const LED1 = '77c7fafe2c6e66e1';
+  const H1 = '52930e4c1065e082';
+  const smd = ['RECT', 31.5, 35.4, 0];
+  const tht = { layer: 12, pad: ['RECT', 60, 60, 0], hole: ['ROUND', 40] };
+  const padsOf = {
+    [R1]: [
+      { id: `${R1}e7`, padNumber: '1', net: '$1N15', x: 440, y: 439.7, pad: smd },
+      { id: `${R1}e8`, padNumber: '2', net: '$1N16', x: 440, y: 380.3, pad: smd },
+    ],
+    [LED1]: [
+      { id: `${LED1}e21`, padNumber: '1', net: '$1N16', x: 439.5, y: 305, pad: smd },
+      { id: `${LED1}e22`, padNumber: '2', net: 'GND', x: 380.5, y: 305, pad: smd },
+    ],
+    [H1]: [
+      { id: `${H1}e15`, padNumber: '1', net: '+5V', x: 55, y: 80, ...tht },
+      { id: `${H1}e16`, padNumber: '2', net: 'PA0', x: 155, y: 80, ...tht },
+    ],
+  };
+  // getState_Pads() 里的焊盘 ID 只有后缀
+  const refs = (componentId) =>
+    padsOf[componentId].map((p) => ({
+      primitiveId: p.id.slice(componentId.length),
+      net: p.net,
+      padNumber: p.padNumber,
+    }));
+  const components = [
+    pcbComponent({ id: R1, designator: 'R1', x: 440, y: 410, pads: refs(R1) }),
+    pcbComponent({ id: LED1, designator: 'LED1', x: 410, y: 305, pads: refs(LED1) }),
+    pcbComponent({ id: H1, designator: 'H1', x: 305, y: 80, pads: refs(H1) }),
+  ];
+  const lines = [
+    pcbLine({ id: 't1', net: '$1N16', from: [440, 380.3], to: [439.5, 305] }), // R1.2 → LED1.1
+    pcbLine({ id: 't2', net: '$1N15', from: [440, 500], to: [440, 439.7] }), // 终点落在 R1.1
+    pcbLine({ id: 't3', net: '$1N15', from: [440, 500], to: [300, 500] }), // 同一网络，不碰 R1
+    pcbLine({ id: 't4', net: '$1N16', from: [439.5, 305], to: [439.5, 250] }), // 同一网络，只连 LED1
+    pcbLine({ id: 't5', net: 'GND', from: [380.5, 305], to: [300, 305] }),
+    // 底层走线的端点正好在顶层贴片焊盘 R1.1 的正下方：它连的是那里的过孔，不是焊盘
+    pcbLine({ id: 't6', net: '$1N15', from: [440, 439.7], to: [500, 439.7], layer: 2 }),
+    // 通孔焊盘各层都连得上
+    pcbLine({ id: 't7', net: '+5V', from: [55, 80], to: [55, 200], layer: 1 }),
+    pcbLine({ id: 't8', net: '+5V', from: [0, 80], to: [55, 80], layer: 2 }),
+  ];
+
+  const deleted = [];
+  const modified = [];
+  const { runtime, state } = boot({
+    extraApi: {
+      pcb_PrimitiveComponent: {
+        getAll: async () => components,
+        getAllPinsByPrimitiveId: async (id) => padsOf[id]?.map((p) => pcbComponentPad(id, p)),
+        modify: async (id, property) => {
+          modified.push({ id, property });
+          return components.find((c) => c.getState_PrimitiveId() === id);
+        },
+      },
+      // 全板焊盘也给上：原来的代码就是在这里面按不存在的 getter 找元件的焊盘
+      pcb_PrimitivePad: { getAll: async () => Object.values(padsOf).flat().map(pcbPad) },
+      pcb_PrimitiveLine: {
+        getAll: async (net) => lines.filter((l) => net === undefined || l.getState_Net() === net),
+        delete: async (ids) => {
+          deleted.push(...[ids].flat());
+          return true;
+        },
+      },
+    },
+  });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'relocate_component', {
+    designator: 'R1',
+    x: 600,
+    y: 410,
+  });
+  assert.equal(reply.ok, true, reply.error);
+  assert.deepEqual([...reply.data.deletedTracks].sort(), ['t1', 't2']);
+  assert.deepEqual(deleted.sort(), ['t1', 't2'], 'EDA 那边真的删了这两条');
+  assert.deepEqual(reply.data.netsToReroute, ['$1N15', '$1N16']);
+  assert.deepEqual(modified, [{ id: R1, property: { x: 600, y: 410, rotation: 0 } }]);
+
+  deleted.length = 0;
+  const h1 = await runCommand(runtime, state, 'relocate_component', { designator: 'H1', x: 305, y: 150 });
+  assert.equal(h1.ok, true, h1.error);
+  assert.deepEqual(deleted.sort(), ['t7', 't8'], '通孔焊盘上顶层、底层的走线都要删');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+// ─── 丝印 ───
+//
+// 文本、焊盘、过孔照 api-types.d.ts 逐个 getter 造。文本图元 IPCB_PrimitiveString 没有
+// getState_Content / getState_CenterX / getState_ParentPrimitiveId；焊盘图元没有 getState_Diameter /
+// getState_PadDiameter。原来焊盘取不到外框时拿这两个不存在的 getter 算避让框，读空之后按 10 mil 见方去判冲突。
+
+function pcbString({ id, text, x, y, layer }) {
+  return {
+    getState_PrimitiveType: () => 'String',
+    getState_PrimitiveId: () => id,
+    getState_Layer: () => layer,
+    getState_X: () => x,
+    getState_Y: () => y,
+    getState_Text: () => text,
+    getState_FontFamily: () => 'default',
+    getState_FontSize: () => 16,
+    getState_LineWidth: () => 2,
+    getState_AlignMode: () => 5,
+    getState_Rotation: () => 0,
+    getState_Reverse: () => false,
+    getState_Expansion: () => 0,
+    getState_Mirror: () => false,
+    getState_PrimitiveLock: () => false,
+  };
+}
+
+function pcbVia({ id, net, x, y, diameter }) {
+  return {
+    getState_PrimitiveType: () => 'Via',
+    getState_PrimitiveId: () => id,
+    getState_Net: () => net,
+    getState_X: () => x,
+    getState_Y: () => y,
+    getState_HoleDiameter: () => diameter / 2,
+    getState_Diameter: () => diameter,
+    getState_ViaType: () => 0,
+    getState_DesignRuleBlindViaName: () => null,
+    getState_SolderMaskExpansion: () => null,
+    getState_PrimitiveLock: () => false,
+  };
+}
+
+/** withoutBox：让 getPrimitivesBBox 对这个图元给 undefined */
+function silkBoardMock({ withoutBox } = {}) {
+  const boxes = {
+    outline: { minX: 0, minY: 0, maxX: 1000, maxY: 1000 },
+    // 80×50 的大焊盘，中心 (440, 305)
+    pad1: { minX: 400, minY: 280, maxX: 480, maxY: 330 },
+    via1: { minX: 188, minY: 188, maxX: 212, maxY: 212 },
+    // 压住焊盘右上角，离焊盘中心远，10 mil 见方的框碰不到它
+    s1: { minX: 462, minY: 326, maxX: 486, maxY: 342 },
+    s2: { minX: 190, minY: 210, maxX: 210, maxY: 220 },
+    s3: { minX: 430, minY: 300, maxX: 450, maxY: 310 },
+  };
+  delete boxes[withoutBox];
+
+  const strings = [
+    pcbString({ id: 's1', text: 'R1', x: 474, y: 334, layer: 3 }),
+    pcbString({ id: 's2', text: 'GND', x: 200, y: 215, layer: 4 }),
+    // 顶层铜皮上的文字，不是丝印
+    pcbString({ id: 's3', text: 'NOTE', x: 440, y: 305, layer: 1 }),
+  ];
+  const moved = [];
+  return {
+    moved,
+    api: {
+      pcb_Primitive: { getPrimitivesBBox: bboxLookup(boxes) },
+      pcb_PrimitiveString: {
+        getAll: async (layer) => strings.filter((s) => layer === undefined || s.getState_Layer() === layer),
+        modify: async (id, property) => {
+          moved.push({ id, property });
+          return strings.find((s) => s.getState_PrimitiveId() === id);
+        },
+      },
+      pcb_PrimitivePad: {
+        getAll: async () => [
+          pcbPad({ id: 'pad1', padNumber: '1', net: '$1N16', x: 440, y: 305, pad: ['RECT', 80, 50, 0] }),
+        ],
+      },
+      pcb_PrimitiveVia: {
+        getAll: async () => [pcbVia({ id: 'via1', net: 'GND', x: 200, y: 200, diameter: 24 })],
+      },
+      // 板框：getBoardBoundingBox 按层 11 取线
+      pcb_PrimitiveLine: {
+        getAll: async (net, layer) =>
+          layer === 11 ? [pcbLine({ id: 'outline', net: '', from: [0, 0], to: [1000, 0] })] : [],
+      },
+    },
+  };
+}
+
+test('丝印冲突按真实 getter 和 EDA 外框判定，只收丝印层上的文本', { skip }, async () => {
+  const m = silkBoardMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_silkscreens', { includeConflicts: true });
+  assert.equal(reply.ok, true, reply.error);
+  assert.deepEqual(
+    reply.data.silkscreens.map((s) => s.primitiveId),
+    ['s1', 's2'],
+    '铜皮层上的文字不算丝印',
+  );
+  const [s1, s2] = reply.data.silkscreens;
+  assert.equal(s1.text, 'R1');
+  assert.equal(s1.x, 474);
+  assert.equal(s1.y, 334);
+  assert.equal(s1.layer, 3);
+  assert.deepEqual(s1.bbox, { minX: 462, minY: 326, maxX: 486, maxY: 342 });
+  assert.equal('parentPrimitiveId' in s1, false, '文本图元没有父图元，不该给一个恒为空的字段');
+  assert.deepEqual(
+    s1.conflicts.map((c) => `${c.type}:${c.targetId}:${c.net}`),
+    ['overlap_pad:pad1:$1N16'],
+  );
+  assert.deepEqual(
+    s2.conflicts.map((c) => `${c.type}:${c.targetId}:${c.net}`),
+    ['overlap_via:via1:GND'],
+  );
+
+  const auto = await runCommand(runtime, state, 'auto_silkscreen');
+  assert.equal(auto.ok, true, auto.error);
+  assert.deepEqual(m.moved.map((mv) => mv.id).sort(), ['s1', 's2']);
+  for (const d of auto.data.details) assert.equal(d.to.score, 0, `${d.primitiveId} 挪完还压着东西`);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('焊盘或过孔取不到外框时直接报错，不许拿猜的框去判丝印冲突', { skip }, async () => {
+  for (const [id, kind] of [
+    ['pad1', '焊盘'],
+    ['via1', '过孔'],
+  ]) {
+    const m = silkBoardMock({ withoutBox: id });
+    const { runtime, state } = boot({ extraApi: m.api });
+    await runtime.call('activate', 'onStartupFinished');
+
+    const reply = await runCommand(runtime, state, 'get_silkscreens', { includeConflicts: true });
+    assert.equal(reply.ok, false, `${kind}没有外框时不该判出一份冲突结果`);
+    assert.match(reply.error, new RegExp(`${kind} ${id} 取不到外框`));
+    delete globalThis.__JLC_BRIDGE_HUB_V2__;
+  }
 });
 
 // ─── 原理图 ───

@@ -5,98 +5,51 @@ import {
   boxInside,
   boxIntersects,
   createBoxFromCenter,
-  estimateStringBox,
-  firstBox,
   isVerticalAngle,
-  readFirstBooleanValue,
-  readFirstNumberValue,
-  readFirstStringValue,
   round3,
   toFinite,
   type Box,
 } from './util';
-import {
-  getBBoxOfPrimitive,
-  getBoardBoundingBox,
-  getSelectedPrimitiveIdSet,
-} from './pcb-state';
+import { getBoardBoundingBox, getSelectedPrimitiveIdSet } from './pcb-state';
 
-async function collectSilkscreenRows(): Promise<any[]> {
+/** EDA 的层 ID：3 顶层丝印，4 底层丝印 */
+const SILKSCREEN_LAYERS = new Set<number>([3, 4]);
+
+/**
+ * 图元外框（画布坐标，mil）。
+ * 丝印和避让目标都用 EDA 自己算的外框：异形焊盘、旋转、文字字形都已经算进去了。
+ * 取不到就报错，免得拿一个猜出来的框去判冲突、挪丝印。
+ */
+async function primitiveBox(kind: string, primitiveId: string): Promise<Box> {
   const api = edaApi();
-  const dedup = new Map<string, any>();
-  const push = (row: any) => {
-    const primitiveId = readFirstStringValue(row, ['getState_PrimitiveId']);
-    if (primitiveId) dedup.set(primitiveId, row);
-  };
-
-  const stringApi = api?.pcb_PrimitiveString;
-  if (stringApi?.getAll) {
-    for (const layer of [3, 4]) {
-      try {
-        const rows = await stringApi.getAll(layer);
-        if (Array.isArray(rows)) rows.forEach(push);
-      } catch {
-        /* 这一层读不到就算了 */
-      }
-    }
-    if (dedup.size === 0) {
-      try {
-        const rows = await stringApi.getAll();
-        if (Array.isArray(rows)) rows.forEach(push);
-      } catch {
-        /* ignore */
-      }
-    }
+  if (!api?.pcb_Primitive?.getPrimitivesBBox) {
+    throw new Error('这版 嘉立创EDA 没有 pcb_Primitive.getPrimitivesBBox，算不出丝印和焊盘的外框');
   }
-
-  if (dedup.size > 0) return Array.from(dedup.values());
-
-  // 兜底：整版扫一遍，挑出有 getState_Text 的
-  try {
-    const rows = await api?.pcb_Document?.getPrimitivesInRegion?.(
-      -1_000_000,
-      1_000_000,
-      1_000_000,
-      -1_000_000,
-      false,
-    );
-    for (const row of Array.isArray(rows) ? rows : []) {
-      if (typeof row?.getState_Text === 'function') push(row);
-    }
-  } catch {
-    /* ignore */
-  }
-  return Array.from(dedup.values());
+  const box: Box | undefined = await api.pcb_Primitive.getPrimitivesBBox([primitiveId]);
+  if (!box) throw new Error(`${kind} ${primitiveId} 取不到外框`);
+  return box;
 }
 
-async function buildSilkscreenItem(row: any, selectedSet: Set<string>): Promise<any | null> {
-  const primitiveId = readFirstStringValue(row, ['getState_PrimitiveId']);
-  if (!primitiveId) return null;
+/** 顶层、底层丝印上的文本。pcb_PrimitiveString 只给不挂在元件上的文本，元件位号不在里面。 */
+async function collectSilkscreenRows(): Promise<IPCB_PrimitiveString[]> {
+  const api = edaApi();
+  if (!api?.pcb_PrimitiveString?.getAll) throw new Error('这版 嘉立创EDA 不支持文本查询');
+  const rows: IPCB_PrimitiveString[] = await api.pcb_PrimitiveString.getAll();
+  return rows.filter((row) => SILKSCREEN_LAYERS.has(row.getState_Layer()));
+}
 
-  const text = readFirstStringValue(row, ['getState_Text', 'getState_Content']);
-  const x = readFirstNumberValue(row, ['getState_X', 'getState_CenterX']);
-  const y = readFirstNumberValue(row, ['getState_Y', 'getState_CenterY']);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-
-  const rotation = toFinite(readFirstNumberValue(row, ['getState_Rotation']), 0);
-  const fontSize = toFinite(readFirstNumberValue(row, ['getState_FontSize']), 10);
-  const layer = readFirstNumberValue(row, ['getState_Layer']);
-  const estimatedBox = estimateStringBox(x!, y!, text, fontSize, rotation);
-  const bbox = firstBox([await getBBoxOfPrimitive(row), estimatedBox]) || estimatedBox;
-
+async function buildSilkscreenItem(row: IPCB_PrimitiveString, selectedSet: Set<string>): Promise<any> {
+  const primitiveId = row.getState_PrimitiveId();
+  const bbox = await primitiveBox('丝印', primitiveId);
   return {
     primitiveId,
-    text,
-    x,
-    y,
-    rotation,
-    fontSize,
-    parentPrimitiveId: readFirstStringValue(row, [
-      'getState_ParentPrimitiveId',
-      'getState_BelongPrimitiveId',
-    ]),
-    layer: Number.isFinite(layer) ? Number(layer) : undefined,
-    locked: Boolean(readFirstBooleanValue(row, ['getState_PrimitiveLock'])),
+    text: row.getState_Text(),
+    x: row.getState_X(),
+    y: row.getState_Y(),
+    rotation: row.getState_Rotation(),
+    fontSize: row.getState_FontSize(),
+    layer: row.getState_Layer(),
+    locked: row.getState_PrimitiveLock(),
     selected: selectedSet.has(primitiveId),
     bbox,
     width: bbox.maxX - bbox.minX,
@@ -104,56 +57,25 @@ async function buildSilkscreenItem(row: any, selectedSet: Set<string>): Promise<
   };
 }
 
-function obstacleBoxOf(row: any, diameterGetters: string[]): Box | undefined {
-  const x = readFirstNumberValue(row, ['getState_X', 'getState_CenterX']);
-  const y = readFirstNumberValue(row, ['getState_Y', 'getState_CenterY']);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined;
-  const size = Math.max(1, toFinite(readFirstNumberValue(row, diameterGetters), 10));
-  return createBoxFromCenter(x!, y!, size, size);
-}
-
 type Obstacle = { primitiveId: string; net: string; box: Box };
 
-async function collectObstacles(
-  getAll: (() => Promise<any>) | undefined,
-  diameterGetters: string[],
-  limit = 10000,
-): Promise<Obstacle[]> {
-  const result: Obstacle[] = [];
-  if (!getAll) return result;
-  let rows: any;
-  try {
-    rows = await getAll();
-  } catch {
-    return result;
-  }
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const primitiveId = readFirstStringValue(row, ['getState_PrimitiveId']);
-    if (!primitiveId) continue;
-    const box = firstBox([await getBBoxOfPrimitive(row), obstacleBoxOf(row, diameterGetters)]);
-    if (!box) continue;
-    result.push({
-      primitiveId,
-      net: readFirstStringValue(row, ['getState_Net', 'getState_NetName']),
-      box,
-    });
-    if (result.length >= limit) break;
-  }
-  return result;
+async function toObstacle(kind: string, row: IPCB_PrimitivePad | IPCB_PrimitiveVia): Promise<Obstacle> {
+  const primitiveId = row.getState_PrimitiveId();
+  return { primitiveId, net: row.getState_Net() ?? '', box: await primitiveBox(kind, primitiveId) };
 }
 
 async function collectAllObstacles(): Promise<{ pads: Obstacle[]; vias: Obstacle[] }> {
   const api = edaApi();
-  return {
-    pads: await collectObstacles(
-      api?.pcb_PrimitivePad?.getAll ? () => api.pcb_PrimitivePad.getAll() : undefined,
-      ['getState_Diameter', 'getState_PadDiameter'],
-    ),
-    vias: await collectObstacles(
-      api?.pcb_PrimitiveVia?.getAll ? () => api.pcb_PrimitiveVia.getAll() : undefined,
-      ['getState_Diameter'],
-    ),
-  };
+  if (!api?.pcb_PrimitivePad?.getAll || !api?.pcb_PrimitiveVia?.getAll) {
+    throw new Error('这版 嘉立创EDA 不支持焊盘或过孔查询，没法判断丝印压没压到它们');
+  }
+  const padRows: IPCB_PrimitivePad[] = await api.pcb_PrimitivePad.getAll();
+  const viaRows: IPCB_PrimitiveVia[] = await api.pcb_PrimitiveVia.getAll();
+  const pads: Obstacle[] = [];
+  for (const row of padRows) pads.push(await toObstacle('焊盘', row));
+  const vias: Obstacle[] = [];
+  for (const row of viaRows) vias.push(await toObstacle('过孔', row));
+  return { pads, vias };
 }
 
 async function detectConflicts(silkscreens: any[]): Promise<{
@@ -239,9 +161,7 @@ export async function getSilkscreens(params?: {
 
   const silkscreens: any[] = [];
   for (const row of rows) {
-    const item = await buildSilkscreenItem(row, selectedSet);
-    if (!item) continue;
-    silkscreens.push(item);
+    silkscreens.push(await buildSilkscreenItem(row, selectedSet));
     if (silkscreens.length >= limit) break;
   }
 

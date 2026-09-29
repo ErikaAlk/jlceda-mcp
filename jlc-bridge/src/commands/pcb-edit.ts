@@ -10,7 +10,6 @@ import {
   getPrimitiveId,
   makeRectPolygonSource,
   makeRectPolygonSourceR,
-  normalizeNetArray,
   parsePrimitiveIds,
   getRectParams,
   toFinite,
@@ -18,17 +17,16 @@ import {
 
 // ─── 元件 ───
 
-async function findComponentRow(designator: string): Promise<{ id: string; row: any }> {
+async function findComponentRow(
+  designator: string,
+): Promise<{ id: string; row: IPCB_PrimitiveComponent }> {
   const api = edaApi();
   if (!api?.pcb_PrimitiveComponent?.getAll || !api?.pcb_PrimitiveComponent?.modify) {
     throw new Error('这版 嘉立创EDA 不支持修改元件');
   }
-  const rows = await api.pcb_PrimitiveComponent.getAll();
-  for (const row of Array.isArray(rows) ? rows : []) {
-    if ((row?.getState_Designator?.() || '') === designator) {
-      const id = row?.getState_PrimitiveId?.() || '';
-      if (id) return { id, row };
-    }
+  const rows: IPCB_PrimitiveComponent[] = await api.pcb_PrimitiveComponent.getAll();
+  for (const row of rows) {
+    if (row.getState_Designator() === designator) return { id: row.getState_PrimitiveId(), row };
   }
   throw new Error(`找不到元件：${designator}`);
 }
@@ -41,14 +39,23 @@ export async function moveComponent(params: {
 }): Promise<any> {
   const api = edaApi();
   const { id, row } = await findComponentRow(params.designator);
-  if (row?.getState_PrimitiveLock?.()) throw new Error(`元件被锁定：${params.designator}`);
+  if (row.getState_PrimitiveLock()) throw new Error(`元件被锁定：${params.designator}`);
 
-  const rotation = params.rotation ?? row?.getState_Rotation?.() ?? 0;
+  const rotation = params.rotation ?? row.getState_Rotation();
   await api.pcb_PrimitiveComponent.modify(id, { x: params.x, y: params.y, rotation });
   return { moved: params.designator, x: params.x, y: params.y, rotation };
 }
 
-/** 搬迁元件：先把直接连到它焊盘上的走线删掉，再移动，避免留下一堆斜拉的残线。 */
+/** EDA 的层 ID：焊盘只会在顶层 1、底层 2 或多层 12 上，多层焊盘各个铜层都连得上 */
+const MULTI_LAYER = 12;
+
+/**
+ * 搬迁元件：先把直接连到它焊盘上的走线删掉，再移动，避免留下一堆斜拉的残线。
+ *
+ * 焊盘图元 IPCB_PrimitivePad 没有位号和父元件 ID，这里用 getAllPinsByPrimitiveId() 直接拿元件的焊盘，
+ * 给的是完整图元 ID 和画布坐标（mil），不含封装自带的过孔。
+ * 走线要和焊盘在同一层、端点落在焊盘中心附近才算连着：贴片焊盘正下方另一层的走线连的是过孔，不能删。
+ */
 export async function relocateComponent(params: {
   designator: string;
   x: number;
@@ -56,67 +63,49 @@ export async function relocateComponent(params: {
   rotation?: number;
 }): Promise<any> {
   const api = edaApi();
-  const { id: targetId, row: targetRow } = await findComponentRow(params.designator);
-  if (targetRow?.getState_PrimitiveLock?.()) throw new Error(`元件被锁定：${params.designator}`);
-
-  const uniqueNets = normalizeNetArray(targetRow?.getState_Pads?.());
-
-  const padPositions: { x: number; y: number }[] = [];
-  if (api?.pcb_PrimitivePad?.getAll) {
-    try {
-      const allPads = await api.pcb_PrimitivePad.getAll();
-      for (const p of Array.isArray(allPads) ? allPads : []) {
-        const des = p?.getState_Designator?.() || '';
-        const parentId =
-          p?.getState_ParentPrimitiveId?.() ||
-          p?.getState_BelongPrimitiveId?.() ||
-          p?.getState_ComponentPrimitiveId?.() ||
-          '';
-        if (des === params.designator || parentId === targetId) {
-          padPositions.push({
-            x: Number(p?.getState_X?.() ?? p?.getState_CenterX?.() ?? 0),
-            y: Number(p?.getState_Y?.() ?? p?.getState_CenterY?.() ?? 0),
-          });
-        }
-      }
-    } catch {
-      /* ignore */
-    }
+  if (!api?.pcb_PrimitiveComponent?.getAllPinsByPrimitiveId) {
+    throw new Error('这版 嘉立创EDA 不支持查询元件焊盘，没法找出连到元件上的走线');
   }
+  if (!api?.pcb_PrimitiveLine?.getAll || !api?.pcb_PrimitiveLine?.delete) {
+    throw new Error('这版 嘉立创EDA 不支持查询或删除走线');
+  }
+  const { id: targetId, row: targetRow } = await findComponentRow(params.designator);
+  if (targetRow.getState_PrimitiveLock()) throw new Error(`元件被锁定：${params.designator}`);
+
+  // 元件一个焊盘都没有时 EDA 返回 undefined
+  const pins: IPCB_PrimitiveComponentPad[] =
+    (await api.pcb_PrimitiveComponent.getAllPinsByPrimitiveId(targetId)) ?? [];
+  const uniqueNets = Array.from(
+    new Set(pins.map((pin) => pin.getState_Net() ?? '').filter(Boolean)),
+  );
 
   const deletedTracks: string[] = [];
   const COORD_TOLERANCE = 2; // mil
-  if (api?.pcb_PrimitiveLine?.getAll && api?.pcb_PrimitiveLine?.delete && padPositions.length > 0) {
-    for (const net of uniqueNets) {
-      try {
-        const trackRows = await api.pcb_PrimitiveLine.getAll(net);
-        const toDelete: string[] = [];
-        for (const t of Array.isArray(trackRows) ? trackRows : []) {
-          const sx = Number(t?.getState_StartX?.() ?? 0);
-          const sy = Number(t?.getState_StartY?.() ?? 0);
-          const ex = Number(t?.getState_EndX?.() ?? 0);
-          const ey = Number(t?.getState_EndY?.() ?? 0);
-          const touchesPad = padPositions.some(
-            (pad) =>
-              (Math.abs(sx - pad.x) <= COORD_TOLERANCE && Math.abs(sy - pad.y) <= COORD_TOLERANCE) ||
-              (Math.abs(ex - pad.x) <= COORD_TOLERANCE && Math.abs(ey - pad.y) <= COORD_TOLERANCE),
-          );
-          if (touchesPad) {
-            const id = t?.getState_PrimitiveId?.();
-            if (id) toDelete.push(id);
-          }
-        }
-        if (toDelete.length > 0) {
-          await api.pcb_PrimitiveLine.delete(toDelete as any);
-          deletedTracks.push(...toDelete);
-        }
-      } catch {
-        /* 单个网络失败不影响其它 */
-      }
+  const onPad = (layer: number, x: number, y: number) =>
+    pins.some((pin) => {
+      const padLayer: number = pin.getState_Layer();
+      return (
+        (padLayer === MULTI_LAYER || padLayer === layer) &&
+        Math.abs(x - pin.getState_X()) <= COORD_TOLERANCE &&
+        Math.abs(y - pin.getState_Y()) <= COORD_TOLERANCE
+      );
+    });
+  for (const net of uniqueNets) {
+    const trackRows: IPCB_PrimitiveLine[] = await api.pcb_PrimitiveLine.getAll(net);
+    const toDelete = trackRows
+      .filter(
+        (t) =>
+          onPad(t.getState_Layer(), t.getState_StartX(), t.getState_StartY()) ||
+          onPad(t.getState_Layer(), t.getState_EndX(), t.getState_EndY()),
+      )
+      .map((t) => t.getState_PrimitiveId());
+    if (toDelete.length > 0) {
+      await api.pcb_PrimitiveLine.delete(toDelete);
+      deletedTracks.push(...toDelete);
     }
   }
 
-  const rotation = params.rotation ?? targetRow?.getState_Rotation?.() ?? 0;
+  const rotation = params.rotation ?? targetRow.getState_Rotation();
   await api.pcb_PrimitiveComponent.modify(targetId, { x: params.x, y: params.y, rotation });
 
   return {
