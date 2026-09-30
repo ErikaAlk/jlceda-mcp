@@ -495,6 +495,207 @@ test('元件宽高取自 getPrimitivesBBox，器件图元没有 getState_Width/H
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
+// ─── 焊盘 ───
+//
+// 焊盘和元件都照 EDA 安装目录 pro-api 的 api-types.d.ts 逐个 getter 造，一个不多。
+// 焊盘图元 IPCB_PrimitivePad 没有位号、父元件 ID、孔径、直径、形状这些 getter，
+// 原来读的全是不存在的方法：真机上 39 个焊盘的 designator / parentPrimitiveId / shape 全是空串，
+// 按位号过滤一条都命中不了。
+//
+// ID 照真机量到的样子造：焊盘的图元 ID 是「元件 ID + 后缀」，
+// 元件 getState_Pads() 里给的只有后缀（EDA 的 pcb.js 序列化元件时把元件 ID 从焊盘 ID 里 replace 掉了）。
+
+function pcbPad({ id, padNumber, net, x, y, layer = 1, pad, hole = null }) {
+  return {
+    getState_PrimitiveType: () => 'Pad',
+    getState_PrimitiveId: () => id,
+    getState_Layer: () => layer,
+    getState_PadNumber: () => padNumber,
+    getState_X: () => x,
+    getState_Y: () => y,
+    getState_Rotation: () => 0,
+    getState_Pad: () => pad,
+    getState_Net: () => net,
+    getState_Hole: () => hole,
+    getState_HoleOffsetX: () => 0,
+    getState_HoleOffsetY: () => 0,
+    getState_HoleRotation: () => 0,
+    getState_Metallization: () => hole !== null,
+    getState_PadType: () => 0,
+    getState_SpecialPad: () => undefined,
+    getState_SolderMaskAndPasteMaskExpansion: () => null,
+    getState_HeatWelding: () => null,
+    getState_PrimitiveLock: () => false,
+  };
+}
+
+function pcbComponent({ id, designator, x, y, pads }) {
+  return {
+    getState_PrimitiveType: () => 'Component',
+    getState_PrimitiveId: () => id,
+    getState_Component: () => ({ libraryUuid: 'lib1', uuid: 'dev1' }),
+    getState_Footprint: () => ({ libraryUuid: 'lib1', uuid: 'fp1' }),
+    getState_Layer: () => 1,
+    getState_X: () => x,
+    getState_Y: () => y,
+    getState_Rotation: () => 0,
+    getState_PrimitiveLock: () => false,
+    getState_AddIntoBom: () => true,
+    getState_Model3D: () => undefined,
+    getState_Designator: () => designator,
+    getState_Pads: () => pads,
+    getState_Name: () => designator,
+    getState_UniqueId: () => undefined,
+    getState_Manufacturer: () => undefined,
+    getState_ManufacturerId: () => undefined,
+    getState_Supplier: () => undefined,
+    getState_SupplierId: () => undefined,
+    getState_OtherProperty: () => ({}),
+  };
+}
+
+/** fullPadIds：让 getState_Pads() 给完整 ID，模拟 EDA 改了 ID 规则 */
+function padBoardMock({ fullPadIds = false } = {}) {
+  const R1 = '240bc228c1ee3a49';
+  const LED1 = '77c7fafe2c6e66e1';
+  const H1 = '52930e4c1065e082';
+  const ref = (componentId, suffix, net, padNumber) => ({
+    primitiveId: fullPadIds ? componentId + suffix : suffix,
+    net,
+    padNumber,
+  });
+  const smd = ['RECT', 31.5, 35.4, 0];
+
+  const components = [
+    pcbComponent({
+      id: R1,
+      designator: 'R1',
+      x: 440,
+      y: 410,
+      pads: [ref(R1, 'e7', '$1N15', '1'), ref(R1, 'e8', '$1N16', '2')],
+    }),
+    pcbComponent({
+      id: LED1,
+      designator: 'LED1',
+      x: 410,
+      y: 305,
+      pads: [ref(LED1, 'e21', '$1N16', '1'), ref(LED1, 'e22', 'GND', '2')],
+    }),
+    pcbComponent({
+      id: H1,
+      designator: 'H1',
+      x: 305,
+      y: 80,
+      pads: [
+        ref(H1, 'e15', '+5V', '1'),
+        ref(H1, 'e16', 'PA0', '2'),
+        // 封装自带的过孔也列在这里（pcb.js 把过孔和焊盘推进同一个数组，编号就是 ID），它不是焊盘
+        ref(H1, 'e30', 'GND', 'e30'),
+      ],
+    }),
+  ];
+
+  const pads = [
+    pcbPad({ id: `${R1}e7`, padNumber: '1', net: '$1N15', x: 440, y: 439.7, pad: smd }),
+    pcbPad({ id: `${R1}e8`, padNumber: '2', net: '$1N16', x: 440, y: 380.3, pad: smd }),
+    pcbPad({ id: `${LED1}e21`, padNumber: '1', net: '$1N16', x: 439.5, y: 305, pad: smd }),
+    pcbPad({ id: `${LED1}e22`, padNumber: '2', net: 'GND', x: 380.5, y: 305, pad: smd }),
+    pcbPad({
+      id: `${H1}e15`,
+      padNumber: '1',
+      net: '+5V',
+      x: 55,
+      y: 80,
+      layer: 12,
+      pad: ['RECT', 60, 60, 0],
+      hole: ['ROUND', 40],
+    }),
+    pcbPad({
+      id: `${H1}e16`,
+      padNumber: '2',
+      net: 'PA0',
+      x: 155,
+      y: 80,
+      layer: 12,
+      pad: ['ELLIPSE', 60, 60],
+      hole: ['ROUND', 40],
+    }),
+    // 直接放在板上、不属于任何元件的焊盘
+    pcbPad({
+      id: 'a1b2c3d4e5f60718',
+      padNumber: '1',
+      net: '',
+      x: 600,
+      y: 600,
+      layer: 12,
+      pad: ['OVAL', 80, 120],
+      hole: ['SLOT', 40, 80],
+    }),
+  ];
+
+  return {
+    api: {
+      pcb_PrimitiveComponent: { getAll: async () => components },
+      pcb_PrimitivePad: { getAll: async () => pads },
+    },
+  };
+}
+
+test('焊盘的位号、所属元件、外形、孔径都从真实 getter 读出来', { skip }, async () => {
+  const m = padBoardMock();
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const r1 = await runCommand(runtime, state, 'get_pads', { designator: 'r1' });
+  assert.equal(r1.ok, true, r1.error);
+  assert.equal(r1.data.returnedPads, 2, '按位号过滤要命中 R1 的两个焊盘，位号不分大小写');
+  for (const pad of r1.data.pads) {
+    assert.equal(pad.designator, 'R1');
+    assert.equal(pad.parentPrimitiveId, '240bc228c1ee3a49');
+  }
+  assert.deepEqual(
+    r1.data.pads.map((p) => p.padNumber),
+    ['1', '2'],
+  );
+  assert.equal(r1.data.pads[0].shape, 'RECT');
+  assert.equal(r1.data.pads[0].width, 31.5);
+  assert.equal(r1.data.pads[0].height, 35.4);
+  assert.equal(r1.data.pads[0].hole, null, '贴片焊盘没有孔');
+
+  const h1 = await runCommand(runtime, state, 'get_pads', { designator: 'H1' });
+  assert.equal(h1.data.returnedPads, 2, '封装自带的过孔不算焊盘');
+  assert.equal(h1.data.pads[1].shape, 'ELLIPSE');
+  assert.deepEqual(h1.data.pads[1].hole, { shape: 'ROUND', diameter: 40 });
+
+  const all = await runCommand(runtime, state, 'get_pads');
+  assert.equal(all.data.returnedPads, 7);
+  const free = all.data.pads.find((p) => p.primitiveId === 'a1b2c3d4e5f60718');
+  assert.equal(free.designator, '', '不属于任何元件的焊盘没有位号');
+  assert.equal(free.parentPrimitiveId, '');
+  assert.deepEqual(free.hole, { shape: 'SLOT', diameter: 40, length: 80 });
+
+  const net = await runCommand(runtime, state, 'get_net_primitives', { net: '$1N16' });
+  assert.equal(net.ok, true, net.error);
+  assert.deepEqual(
+    net.data.pads.map((p) => `${p.designator}.${p.padNumber}`).sort(),
+    ['LED1.1', 'R1.2'],
+  );
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('元件的焊盘 ID 拼不出任何焊盘时直接报错，不许退回位号全空', { skip }, async () => {
+  // 哪天 EDA 把 getState_Pads() 改成给完整 ID，「元件 ID + 后缀」就一个焊盘都拼不出来。
+  // 这时要当场报出来，不能又变回「位号全是空串、按位号过滤一条不中」却不报错。
+  const m = padBoardMock({ fullPadIds: true });
+  const { runtime, state } = boot({ extraApi: m.api });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const reply = await runCommand(runtime, state, 'get_pads', { designator: 'R1' });
+  assert.equal(reply.ok, false);
+  assert.match(reply.error, /对不上/);
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
 // ─── 原理图 ───
 //
 // 下面这组的 fixture 全部照真机量到的形状造：真实原理图上 sch_PrimitiveComponent.getAll()

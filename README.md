@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 44 项自动化测试
+npm test              # 46 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -140,6 +140,19 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 ## 更新记录
 
 ### 未发布
+
+**2026-09-29** `pcb_get_pads` 返回的焊盘 `designator`、`parentPrimitiveId`、`shape` 全是空串，没有 `holeDiameter` / `diameter`，
+按位号过滤（如 `designator=R1`）一条都命中不了；`pcb_get_net_primitives` 里焊盘的 `designator` 也是空串。
+扩展读的 `getState_Designator()`、`getState_ParentPrimitiveId()`、`getState_HoleDiameter()`、`getState_Shape()` 这些方法，
+EDA 的焊盘图元 `IPCB_PrimitivePad` 一个都没有（对照 EDA 安装目录 `pro-api` 下的 `api-types.d.ts` 核实）。
+现在位号和所属元件从元件的 `getState_Pads()` 反查。那里给的焊盘 ID 只是后缀，焊盘的完整图元 ID 是「元件 ID + 后缀」
+（EDA 的 `pcb.js` 就是这么拼的，真机上 39 个焊盘也全是这样）；一个焊盘都拼不上时直接报错。
+外形和孔改读 `getState_Pad()` / `getState_Hole()`：返回 `shape` 和对应尺寸（矩形、圆形、长圆形是 `width` / `height`，
+矩形另有圆角比例 `cornerRadiusRatio`，是百分数），`hole` 在贴片焊盘上是 `null`，否则是 `{shape, diameter}`，槽孔多一个 `length`，
+尺寸单位 mil。另外补上了 `padNumber` 和 `rotation`。
+扩展里焊盘和元件的图元对象改标成类型包里的 `IPCB_PrimitivePad` / `IPCB_PrimitiveComponent`，
+再调用不存在的 getter，`npm run build:ext` 的类型检查会直接报错。
+改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
 
 **2026-09-29** `pcb_get_state` 返回的每个元件 `width`、`height` 都是 0，`boardBounds` 也只按元件中心点围出来。
 扩展读的是 `getState_Width()` / `getState_Height()`，EDA 的器件图元 `IPCB_PrimitiveComponent` 没有这两个方法
