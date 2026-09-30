@@ -46,24 +46,6 @@ export function readFirstNumberValue(target: any, getterNames: string[]): number
   return undefined;
 }
 
-export function normalizeAngle(angle: number): number {
-  let value = toFinite(angle, 0);
-  while (value <= -180) value += 360;
-  while (value > 180) value -= 360;
-  return value;
-}
-
-export function isVerticalAngle(angle: number): boolean {
-  const a = Math.abs(normalizeAngle(angle));
-  return Math.abs(a - 90) <= 20;
-}
-
-export function createBoxFromCenter(x: number, y: number, width: number, height: number): Box {
-  const halfW = Math.max(0, toFinite(width, 0) / 2);
-  const halfH = Math.max(0, toFinite(height, 0) / 2);
-  return { minX: x - halfW, minY: y - halfH, maxX: x + halfW, maxY: y + halfH };
-}
-
 export function boxIntersects(a: Box, b: Box, tolerance = 0): boolean {
   const t = Math.max(0, toFinite(tolerance, 0));
   if (a.maxX < b.minX - t) return false;

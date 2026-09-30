@@ -1,15 +1,7 @@
 // 丝印：查询、冲突检测、单个移动、自动避让。
 
 import { edaApi } from '../eda';
-import {
-  boxInside,
-  boxIntersects,
-  createBoxFromCenter,
-  isVerticalAngle,
-  round3,
-  toFinite,
-  type Box,
-} from './util';
+import { boxInside, boxIntersects, round3, toFinite, type Box } from './util';
 import { getBoardBoundingBox, getSelectedPrimitiveIdSet, primitiveBox } from './pcb-state';
 
 /** EDA 的层 ID：3 顶层丝印，4 底层丝印 */
@@ -130,6 +122,7 @@ async function buildSilkscreenItem(silk: SilkRow, selectedSet: Set<string>): Pro
     primitiveId,
     ...fields,
     rotation: row.getState_Rotation(),
+    mirror: row.getState_Mirror(),
     fontSize: row.getState_FontSize(),
     layer: row.getState_Layer(),
     locked: row.getState_PrimitiveLock(),
@@ -349,11 +342,41 @@ function describeItem(item: any): Record<string, unknown> {
   return item.kind === 'attribute' ? { ...base, designator: item.designator } : base;
 }
 
-function translatedBox(item: any, x: number, y: number, rotation: number): Box {
-  const w = Math.max(1, toFinite(item?.width, 10));
-  const h = Math.max(1, toFinite(item?.height, 10));
-  const vertical = isVerticalAngle(rotation);
-  return createBoxFromCenter(x, y, vertical ? h : w, vertical ? w : h);
+/** pcb.js 的 gs()：底层的层 ID */
+const BOTTOM_LAYERS = new Set<number>([2, 4, 6, 8, 10, 59]);
+
+/**
+ * 丝印锚点挪到 (x, y)、转到 rotation 度时的外框。
+ *
+ * 文本、属性的 x/y 是对齐锚点，不一定是外框中心。pcb.js 的 TextModel 用
+ * getMatrix4(对齐偏移, 弧度, 翻转 ? -1 : 1, 锚点) 摆字：字框按对齐方式放到锚点一侧，绕锚点转，
+ * 翻转时再把相对锚点的 x 取反。翻转由 Lc() 判断：底层上没勾镜像、顶层上勾了镜像的字是翻转的。
+ * 坐标 y 轴向上，角度逆时针为正（api.js 只把坐标乘 10、把弧度换成度）。翻转的字转 Δ，外框绕锚点转的是 -Δ。
+ *
+ * 所以候选框从 EDA 给的真实外框推：四个角绕原锚点转过角度差，取外接框，再平移到新锚点。
+ * 原角度或角度差是 90° 的整数倍时和 EDA 的外框一样。两者都不是时候选框只会偏大，字越细长偏得越多
+ * （斜 45° 的 40×10 的字转到 0° 算成 50×50），这种丝印换角度的候选容易被判成冲突，多半只会平移。
+ */
+function candidateBox(item: any, x: number, y: number, rotation: number): Box {
+  const flipped = BOTTOM_LAYERS.has(item.layer) !== item.mirror;
+  const turn = ((flipped ? -1 : 1) * (rotation - item.rotation) * Math.PI) / 180;
+  const cos = Math.cos(turn);
+  const sin = Math.sin(turn);
+  const { minX, minY, maxX, maxY } = item.bbox as Box;
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const [cornerX, cornerY] of [
+    [minX, minY],
+    [minX, maxY],
+    [maxX, minY],
+    [maxX, maxY],
+  ]) {
+    const dx = cornerX - item.x;
+    const dy = cornerY - item.y;
+    xs.push(x + dx * cos - dy * sin);
+    ys.push(y + dx * sin + dy * cos);
+  }
+  return { minX: Math.min(...xs), minY: Math.min(...ys), maxX: Math.max(...xs), maxY: Math.max(...ys) };
 }
 
 /**
@@ -426,10 +449,10 @@ export async function autoSilkscreen(params?: {
       continue;
     }
 
-    const ox = toFinite(item.x, 0);
-    const oy = toFinite(item.y, 0);
-    const orot = toFinite(item.rotation, 0);
-    const originalScore = score(primitiveId, translatedBox(item, ox, oy, orot));
+    const ox: number = item.x;
+    const oy: number = item.y;
+    const orot: number = item.rotation;
+    const originalScore = score(primitiveId, item.bbox);
 
     let best = { x: ox, y: oy, rotation: orot, score: originalScore, distance: 0 };
     const angles = Array.from(new Set([orot, ...angleCandidates]));
@@ -439,7 +462,7 @@ export async function autoSilkscreen(params?: {
         const x = round3(ox + dx * radius);
         const y = round3(oy + dy * radius);
         for (const rotation of angles) {
-          const candidateScore = score(primitiveId, translatedBox(item, x, y, rotation));
+          const candidateScore = score(primitiveId, candidateBox(item, x, y, rotation));
           const distance = Math.hypot(x - ox, y - oy);
           if (candidateScore < best.score || (candidateScore === best.score && distance < best.distance)) {
             best = { x, y, rotation, score: candidateScore, distance };
@@ -454,7 +477,7 @@ export async function autoSilkscreen(params?: {
       if (!silk) throw new Error(`丝印 ${primitiveId} 在查询结果里却没有对应的图元对象`);
       await writeMove(silk.row, { x: best.x, y: best.y, rotation: best.rotation });
       moved += 1;
-      fixedBoxes.set(primitiveId, translatedBox(item, best.x, best.y, best.rotation));
+      fixedBoxes.set(primitiveId, candidateBox(item, best.x, best.y, best.rotation));
       details.push({
         ...describeItem(item),
         from: { x: ox, y: oy, rotation: orot, score: originalScore },
