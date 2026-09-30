@@ -17,13 +17,22 @@ export async function getPCBState(): Promise<any> {
   const api = edaApi();
 
   const components: any[] = [];
+  const boxes: Box[] = [];
   if (api?.pcb_PrimitiveComponent?.getAll) {
     const rows = await api.pcb_PrimitiveComponent.getAll();
     if (Array.isArray(rows)) {
+      if (!api?.pcb_Primitive?.getPrimitivesBBox) {
+        throw new Error('这版 嘉立创EDA 没有 pcb_Primitive.getPrimitivesBBox，读不出元件尺寸');
+      }
       for (const row of rows) {
         const primitiveId = row?.getState_PrimitiveId?.() || '';
         const designator = row?.getState_Designator?.() || '';
         if (!primitiveId || !designator) continue;
+
+        // IPCB_PrimitiveComponent 没有尺寸 getter，宽高只能取图元外框（画布坐标系，mil）
+        const bbox: Box | undefined = await api.pcb_Primitive.getPrimitivesBBox([primitiveId]);
+        if (!bbox) throw new Error(`元件 ${designator} 取不到外框`);
+        boxes.push(bbox);
 
         components.push({
           primitiveId,
@@ -32,8 +41,8 @@ export async function getPCBState(): Promise<any> {
           x: Number(row?.getState_X?.() ?? 0),
           y: Number(row?.getState_Y?.() ?? 0),
           rotation: Number(row?.getState_Rotation?.() ?? 0),
-          width: Number(row?.getState_Width?.() ?? 0),
-          height: Number(row?.getState_Height?.() ?? 0),
+          width: bbox.maxX - bbox.minX,
+          height: bbox.maxY - bbox.minY,
           layer: String(row?.getState_Layer?.() ?? ''),
           locked: Boolean(row?.getState_PrimitiveLock?.()),
           padNets: normalizeNetArray(row?.getState_Pads?.()),
@@ -42,15 +51,16 @@ export async function getPCBState(): Promise<any> {
     }
   }
 
+  // 封装原点不一定在外框正中，板框范围直接按外框算
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
   let maxY = Number.NEGATIVE_INFINITY;
-  for (const c of components) {
-    minX = Math.min(minX, c.x - c.width / 2);
-    minY = Math.min(minY, c.y - c.height / 2);
-    maxX = Math.max(maxX, c.x + c.width / 2);
-    maxY = Math.max(maxY, c.y + c.height / 2);
+  for (const b of boxes) {
+    minX = Math.min(minX, b.minX);
+    minY = Math.min(minY, b.minY);
+    maxX = Math.max(maxX, b.maxX);
+    maxY = Math.max(maxY, b.maxY);
   }
 
   const nets: any[] = [];

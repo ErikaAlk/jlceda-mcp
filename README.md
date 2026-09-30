@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 43 项自动化测试
+npm test              # 44 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -140,6 +140,12 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 ## 更新记录
 
 ### 未发布
+
+**2026-09-29** `pcb_get_state` 返回的每个元件 `width`、`height` 都是 0，`boardBounds` 也只按元件中心点围出来。
+扩展读的是 `getState_Width()` / `getState_Height()`，EDA 的器件图元 `IPCB_PrimitiveComponent` 没有这两个方法
+（对照 EDA 安装目录 `pro-api` 下的 `api-types.d.ts` 核实）。现在宽高取自 `pcb_Primitive.getPrimitivesBBox()`
+给出的元件外框（mil），`boardBounds` 直接按各元件外框的并集算。取不到某个元件的外框时直接报错并写出位号。
+改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
 
 **2026-09-29** `pcb_get_tracks` 和 `pcb_get_net_primitives` 返回的每条导线 `width` 都是 0。
 扩展读的是 `getState_Width()`，EDA 的导线图元 `IPCB_PrimitiveLine` 没有这个方法，
