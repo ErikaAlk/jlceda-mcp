@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createEdaRuntime, createEdaMock } from './eda-sandbox.mjs';
@@ -26,9 +27,9 @@ const getHubState = () => globalThis.__JLC_BRIDGE_HUB_V2__;
 const live = [];
 
 function boot(options) {
-  const { eda, state, dispose } = createEdaMock(options);
+  const { eda, state, dispose, unloadExtension } = createEdaMock(options);
   live.push(dispose);
-  return { runtime: createEdaRuntime(BUNDLE, eda), state };
+  return { runtime: createEdaRuntime(BUNDLE, eda), state, unloadExtension };
 }
 
 test('激活后立刻自己连出去，不需要人去点任何开关', { skip }, async () => {
@@ -344,6 +345,54 @@ test('对端消失后靠主动 ping 尽快发现，而不是干等 11 秒', { sk
   tick();
 
   assert.notEqual(hub.phase, 'online', 'send 抛错就该立刻判定断线，不用等 RX 超时');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
+test('改了代码、版本号没变，重新导入后新代码立刻推倒重连', { skip }, async () => {
+  // EDA 覆盖导入同 UUID 的扩展时先卸载旧的（api.js 的 mw → $v：清定时器、摘监听、关连接），
+  // 再按 onStartupFinished 激活新代码。globalThis 上的 hub 原样留着，phase 还是 online。
+  // CODE_BUILD 原来只取版本号，版本号没变时新代码认不出这是上一版留下的状态。
+  // 3.2.166 的 $v 关连接时会报错中断（见 CLAUDE.md 不变量 1），真机上要先暂停桥接再导入；
+  // 这里模拟的是卸载顺利走完的情况。
+  const { compile } = createRequire(import.meta.url)('../jlc-bridge/build/compile.js');
+  const { runtime, state, unloadExtension } = boot();
+  await runtime.call('activate', 'onStartupFinished');
+
+  const hub = getHubState();
+  assert.equal(hub.phase, 'online');
+  const firstBuild = hub.codeBuild;
+  const firstOnMessage = state.ws.onMessage;
+
+  // 同一份代码再求值几次都不许重连：CODE_BUILD 是构建时定下的，不是每次求值现算的
+  await runtime.call('showStatus');
+  await runtime.call('activate', 'onEditorPcb');
+  assert.equal(hub.codeBuild, firstBuild);
+  assert.equal(state.ws.closed, 0);
+  assert.equal(state.ws.registered.length, 1);
+  assert.equal(state.ws.onMessage, firstOnMessage);
+
+  // 按 npm run build:ext 的打包方式打出改过一行的下一版，版本号不动
+  const next = await compile({ banner: { js: '// 改过代码的下一版' } });
+  unloadExtension();
+  runtime.reimport(next.code);
+  await runtime.call('activate', 'onStartupFinished');
+
+  assert.match(hub.logs.join('\n'), /检测到扩展代码已更新/, '新代码应该认出 hub 是上一版留下的');
+  assert.equal(state.ws.closed, 1, '新代码应该先 hardReset 放掉旧连接');
+  assert.equal(state.ws.registered.length, 2, '新代码应该立刻重新 register，不等保活 ping 失败');
+  assert.equal(typeof state.ws.onMessage, 'function', 'onMessage 应该是新代码注册的闭包');
+  assert.notEqual(state.ws.onMessage, firstOnMessage);
+  assert.equal(hub.phase, 'online');
+
+  state.ws.sent.length = 0;
+  state.ws.onMessage({ data: JSON.stringify({ v: 2, t: 'ping', ts: 1 }) });
+  const pong = state.ws.sent.map((s) => JSON.parse(s)).find((m) => m.t === 'pong');
+  assert.ok(pong, '新注册的 onMessage 应该在处理消息');
+
+  // 两份产物的 CODE_BUILD 只差在代码哈希上
+  assert.match(firstBuild, /\+[0-9a-f]{12}$/, 'CODE_BUILD 应该带上构建时算出的代码哈希');
+  assert.equal(hub.codeBuild, `${firstBuild.slice(0, -12)}${next.codeHash}`);
+  assert.notEqual(next.codeHash, firstBuild.slice(-12));
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
