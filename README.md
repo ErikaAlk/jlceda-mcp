@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 42 项自动化测试
+npm test              # 43 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -139,9 +139,16 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 
 ## 更新记录
 
-### 未发布（2026-08-25）
+### 未发布
 
-只动 README。标题从 `# jlceda-mcp —— 让 Claude Code 直接操作 嘉立创EDA 专业版`
+**2026-09-29** `pcb_get_tracks` 和 `pcb_get_net_primitives` 返回的每条导线 `width` 都是 0。
+扩展读的是 `getState_Width()`，EDA 的导线图元 `IPCB_PrimitiveLine` 没有这个方法，
+线宽要从 `getState_LineWidth()` 读（对照 EDA 安装目录 `pro-api` 下的 `api-types.d.ts` 核实）。
+改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
+顺带把 `tests/reconnect-live.test.mjs` 的端口改成运行时现取：原来写死 18931，
+本机有别的程序占着这个端口时 broker 起不来，「EDA 先起、端口上没有任何人」这一步的前提也不成立。
+
+**2026-08-25** 只动 README。标题从 `# jlceda-mcp —— 让 Claude Code 直接操作 嘉立创EDA 专业版`
 收成 `# jlceda-mcp`，正下方那段本来就把这件事说清楚了。正文里的破折号
 22 → 0，几处列表项开头的加粗标签去掉。内容一条没删，没有出新版本。
 

@@ -397,6 +397,37 @@ test('get_board_info 要认得 EDA 真实返回的字段名', { skip }, async ()
   delete globalThis.__JLC_BRIDGE_HUB_V2__;
 });
 
+test('导线线宽读 getState_LineWidth，导线图元没有 getState_Width', { skip }, async () => {
+  // 照 EDA 安装目录 pro-api 的 api-types.d.ts 里 IPCB_PrimitiveLine 的 getter 逐个造，
+  // 线宽只有 getState_LineWidth()。原来读的是不存在的 getState_Width()，
+  // pcb_get_tracks 和 pcb_get_net_primitives 返回的每条导线 width 都是 0。
+  const line = {
+    getState_PrimitiveType: () => 'Line',
+    getState_PrimitiveId: () => 't1',
+    getState_Net: () => 'GND',
+    getState_Layer: () => 1,
+    getState_StartX: () => 0,
+    getState_StartY: () => 0,
+    getState_EndX: () => 100,
+    getState_EndY: () => 0,
+    getState_LineWidth: () => 12,
+    getState_PrimitiveLock: () => false,
+  };
+  const { runtime, state } = boot({
+    extraApi: { pcb_PrimitiveLine: { getAll: async () => [line] } },
+  });
+  await runtime.call('activate', 'onStartupFinished');
+
+  const tracks = await runCommand(runtime, state, 'get_tracks');
+  assert.equal(tracks.ok, true, tracks.error);
+  assert.equal(tracks.data.tracks[0].width, 12, 'get_tracks 的线宽');
+
+  const netPrims = await runCommand(runtime, state, 'get_net_primitives', { net: 'GND' });
+  assert.equal(netPrims.ok, true, netPrims.error);
+  assert.equal(netPrims.data.tracks[0].width, 12, 'get_net_primitives 的线宽');
+  delete globalThis.__JLC_BRIDGE_HUB_V2__;
+});
+
 // ─── 原理图 ───
 //
 // 下面这组的 fixture 全部照真机量到的形状造：真实原理图上 sch_PrimitiveComponent.getAll()

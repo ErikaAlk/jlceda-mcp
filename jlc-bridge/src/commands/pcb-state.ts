@@ -275,7 +275,7 @@ export async function getTracks(params: { net?: string; layer?: number }): Promi
       startY: Number(r?.getState_StartY?.() ?? 0),
       endX: Number(r?.getState_EndX?.() ?? 0),
       endY: Number(r?.getState_EndY?.() ?? 0),
-      width: Number(r?.getState_Width?.() ?? 0),
+      width: Number(r?.getState_LineWidth?.() ?? 0),
     }))
     .filter((t: any) => t.primitiveId);
   return { tracks, count: tracks.length };
@@ -305,7 +305,7 @@ export async function getNetPrimitives(params: { net: string }): Promise<any> {
         endX: Number(r?.getState_EndX?.() ?? 0),
         endY: Number(r?.getState_EndY?.() ?? 0),
         layer: r?.getState_Layer?.() ?? '',
-        width: Number(r?.getState_Width?.() ?? 0),
+        width: Number(r?.getState_LineWidth?.() ?? 0),
       });
     }
   }
