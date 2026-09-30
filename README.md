@@ -68,7 +68,7 @@ jlc-bridge/build/jlc-bridge.eext
 | 布线 | `pcb_route_track` `pcb_create_via` `pcb_delete_tracks` `pcb_delete_via` |
 | 铜箔 | `pcb_create_copper_pour` `pcb_create_keepout` `pcb_delete_pour` `pcb_delete_keepout` |
 | 规则 | `pcb_create_diff_pair` `pcb_create_equal_length` + 各自的 list / delete |
-| 丝印 | `pcb_move_silkscreen` `pcb_auto_silkscreen`（自动避让焊盘 / 过孔 / 其它丝印） |
+| 丝印 | `pcb_move_silkscreen` `pcb_auto_silkscreen`（自动避让焊盘 / 过孔 / 其它丝印，元件位号也在内） |
 | 检查 | `pcb_run_drc` `sch_run_drc` |
 | 原理图 | `sch_get_state`（元件+网络，可按位号过滤）`sch_get_netlist`（连接关系，可按网络/位号点查）`pcb_open_document` |
 | 计算 | `calc_impedance`（含反算线宽）`calc_trace_width`（IPC-2221） |
@@ -114,7 +114,7 @@ npm run live -- --watch     # 每 5 秒重试直到通过（边改边看最省�
 npm run build         # 编 mcp-server（TypeScript → dist/）
 npm run build:ext     # 类型检查 + 打包扩展 → jlc-bridge/build/*.eext
 npm run build:all     # 两个一起
-npm test              # 53 项自动化测试
+npm test              # 59 项自动化测试
 npm run check         # build + test
 npm run broker        # 单独跑一个常驻 broker（平时不需要，排障时看得清楚）
 ```
@@ -141,6 +141,25 @@ npm run broker        # 单独跑一个常驻 broker（平时不需要，排障�
 
 ### 未发布
 
+**2026-09-29** `pcb_get_silkscreens` 查不出元件位号，`pcb_auto_silkscreen` 因此从来没挪过位号。
+扩展只读 `pcb_PrimitiveString.getAll()`，EDA 的 `pcb.js` 在这个接口里按 `!getParent()` 过滤，只给不挂在元件上的文本；
+位号、值这些挂在元件上的字是属性图元 `IPCB_PrimitiveAttribute`，真机上一块摆了 11 个元件的板查出来是 0 条丝印。
+现在顶层、底层丝印上显示出字的元件属性也一并收进来。每条丝印多了 `kind`：`string` 是文本，`attribute` 是元件属性；
+属性条目另有 `key`、`value`、`parentPrimitiveId` 和所属元件的 `designator`，`text` 是画布上显示的字（Key、Value 都显示时是 `Key:Value`）。
+隐藏的属性、不在丝印层的属性、勾了显示但没有字的属性都不收。
+属性的外框同样取 `pcb_Primitive.getPrimitivesBBox()`，取不到就报错并写出位号；属性所属的元件没有位号时也直接报错。
+挪动时文本和属性各自写回自己的图元：先 `reset()` 读回画布现状，改完坐标再 await 图元对象的 `done()`。
+`pcb_PrimitiveString.modify` / `pcb_PrimitiveAttribute.modify` 在 `api.js` 里调 `done()` 时没有 await，
+EDA 拒绝写入时报的「对象参数不正确，无法应用到画布」没人接，调用方照样拿到成功；
+`done()` 发的是同一个 modify 请求，现在写入失败会直接报错。
+`done()` 会把对象的全部字段写回画布，先 `reset()` 是为了不拿查询时的旧值盖掉用户在这段时间里改过的内容（比如位号）。
+自动避让的 `details` 里属性条目带所属元件位号。
+`pcb_move_silkscreen` 按 `primitiveId` 认出是文本还是元件属性，返回里带 `kind`；`rotation` 不是有限数时直接报错。
+两种都找不到时直接报错：原来不管什么 ID 都交给文本的 modify，EDA 找不到这个图元时也照样报成功。
+`pcb_get_feature_support` 的 `silkscreen.query` 改为文本、属性、元件查询和 `getPrimitivesBBox` 都在才算支持，
+`silkscreen.modify` 改为文本和属性查询都在才算支持。
+改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
+
 **2026-09-29** `pcb_relocate_component` 的自动断线从来没删过走线，返回的 `deletedTracks` 恒为空。
 扩展要从 `pcb_PrimitivePad.getAll()` 的焊盘里挑出这个元件的焊盘，读的是 `getState_Designator()`、`getState_ParentPrimitiveId()`、
 `getState_CenterX()` 这些方法，EDA 的焊盘图元 `IPCB_PrimitivePad` 一个都没有（对照 EDA 安装目录 `pro-api` 下的 `api-types.d.ts` 核实），
@@ -163,7 +182,6 @@ EDA 认定连着的走线里，只删端点落在焊盘外框（四边放宽半�
 丝印条目去掉了 `parentPrimitiveId`：文本图元 `IPCB_PrimitiveString` 没有这个方法，这个字段一直是空串。
 丝印只收顶层、底层丝印（层 3、4）上的文本，原来这两层读不到时会把所有层的文本都当成丝印。
 读文本、焊盘、过孔出错时直接报错，不再当成「没有」。
-另外核实到：`pcb_PrimitiveString.getAll()` 只给不挂在元件上的文本，元件位号不在里面，这两个工具目前看不到位号。
 这几处的图元对象都标成了类型包里的 `IPCB_*` 类型，再调用不存在的 getter，`npm run build:ext` 的类型检查会直接报错。
 改的是扩展，要在 EDA 里重新导入 `jlc-bridge/build/jlc-bridge.eext` 才生效。
 

@@ -163,9 +163,18 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 （`pro-pcb/<版本>/js/pcb.js` 序列化元件时写的是 `pad.globalIndex.replace(component.globalIndex, '')`），
 焊盘的完整 ID 要拼成「元件 ID + 后缀」，列表里还混着封装自带的过孔。实现见 `mapPadOwners()`。
 
-`pcb_PrimitiveString.getAll()` 只给不挂在元件上的文本（`pcb.js` 里按 `!getParent()` 过滤了），元件位号不在里面，
-所以 `pcb_get_silkscreens` / `pcb_auto_silkscreen` 目前看不到位号，真机上一块摆满元件的板查出来是 0 条。
-文本图元也没有父图元 ID 的 getter。
+丝印上的字有两种图元。`pcb_PrimitiveString.getAll()` 只给不挂在元件上的文本（`pcb.js` 里按 `!getParent()` 过滤了），
+文本图元没有父图元 ID 的 getter。位号、值这些挂在元件上的字是属性图元 `IPCB_PrimitiveAttribute`，
+从 `pcb_PrimitiveAttribute.getAll()` 取。
+这个列表里是全部元件的全部属性，多数是隐藏的（Key、Value 都不显示），隐藏属性可能没有摆放位置，这时坐标给的是原点，
+所以只收丝印层（3、4）上显示出字的属性，判断条件照 `pcb.js` 的 `modifyAttrPosition`（见 `silkscreen.ts`）。
+`pcb_PrimitiveAttribute.get(单个 ID)` 查不到时返回空数组（类型声明写的是 `undefined`），按 ID 分辨文本和属性要到两个 `getAll()` 里找。
+
+`api.js` 里 14 个 PCB 图元类（文本、属性、元件、导线、过孔等）的 `modify()` 调 `done()` 时没有 await：
+EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画布」没人接，`modify()` 照样返回图元对象。
+要让写入失败报出来，取到图元对象后先 `reset()` 读回画布现状，`setState_*` 之后 await 它的 `done()`
+（见 `silkscreen.ts` 的 `writeMove()`）。`done()` 发的是对象的全部字段，不先 `reset()` 就会拿取对象时的旧值覆盖画布。
+类型包里没有 `reset()` / `done()`，用到的声明照 EDA 安装目录的 `api-types.d.ts` 补在 `jlc-bridge/src/eda-beta.d.ts`。
 
 运行中的 EDA 加载的是哪一版 `pcb.js` / `api.js`，看 `assets/pro-versions/<版本>/editor.ini`。
 
@@ -185,4 +194,4 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（53 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（59 项）。每条断言都对应一个踩过的坑，别随手删。
