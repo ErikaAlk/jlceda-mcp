@@ -31,7 +31,7 @@ Claude Code ⇄(stdio) mcp-server ⇄(ws://127.0.0.1:18800/ws/bridge) JLC MCP �
 也就是说：
 
 > **模块级的 `let` / 闭包变量，在两次菜单点击之间不保留。**
-> 启动激活、点「状态」、点「暂停」——每一次都是一个全新的模块实例。
+> 启动激活、点「状态」、点「暂停」，每一次都是一个全新的模块实例。
 
 能跨越重新求值活下来的只有三样：
 
@@ -42,8 +42,17 @@ Claude Code ⇄(stdio) mcp-server ⇄(ws://127.0.0.1:18800/ws/bridge) JLC MCP �
 所以：**所有跨调用的状态一律挂在 `hub.ts` 的 `globalThis.__JLC_BRIDGE_HUB_V2__` 上**，
 每个导出函数第一件事都是 `boot()`（幂等）。别写 `let connected = false` 这种。
 
-装了新版扩展之后，还活着的 `onMessage` 闭包是**上一版代码**的。
-`link.ts` 靠 `hub.codeBuild !== CODE_BUILD` 发现这件事并推倒重连，让新代码接管。别删。
+在扩展管理器里覆盖导入同 UUID 的扩展时，EDA 先卸载旧的那份（`api.js` 的 `mw()` → `$v()`），再写入新包、加载新代码，
+已登录时紧接着按 `onStartupFinished` 激活（`dw()` → `Ig()`）。`$v()` 依次删菜单、清掉这个扩展的 `sys_Timer`，
+再对它的每条 `sys_WebSocket` 连接摘掉 message / open 监听、调 `WebSocket.close(undefined, 原因)`。
+3.2.166（`pro-api` 0.3.4.b3076052）里这一调用会被 Chromium 拒绝（`InvalidAccessError`，关闭码 0 不合法），`$v()` 在这里中断：
+新包没写进去，JLC MCP 菜单没了，旧扩展停在卸载了一半的状态，只能重启 EDA。卸载、停用扩展走的也是 `$v()`，一样会失败。
+所以**扩展连着的时候不能覆盖导入**：先点「暂停桥接」（`pause()` → `hardReset()` 用不带参数的 `close()` 把连接从 EDA 的连接表里摘掉），
+导入之后再点「恢复桥接」。这个顺序 2026-09-29 在真机上连续导入三次都成功，报错也是那天用调试端口抓到的（见「想看扩展里发生了什么」）。
+
+`globalThis` 上的 hub 不归 EDA 管，导入前后是同一份，新代码拿到的是上一版留下的状态。
+`link.ts` 靠 `hub.codeBuild !== CODE_BUILD` 发现这件事，推倒重连，并在运行日志里记一条「检测到扩展代码已更新（旧 → 新）」。别删。
+`CODE_BUILD` 是「版本号+代码哈希」，哈希由 `jlc-bridge/build/compile.js` 在构建时对打包产物取 SHA-256 注入，改了代码、版本号不动也会变。
 
 ## ⚠ 不变量 2：`sys_WebSocket` 没有 close / error 回调
 
@@ -56,13 +65,13 @@ Claude Code ⇄(stdio) mcp-server ⇄(ws://127.0.0.1:18800/ws/bridge) JLC MCP �
 - **连不上时同样一个回调都不给**：对端不在时 `new WebSocket(...)` 照样构造成功，
   失败是异步的，`onConnected` 永远不来。所以 `connecting` **必须有超时**
   （`CONNECT_TIMEOUT_MS`），超了就 `hardReset` 重来。
-  少了这条，phase 会永远停在 `connecting`、心跳再也不会重新 `register`——
+  少了这条，phase 会永远停在 `connecting`、心跳再也不会重新 `register`，
   表现就是用户报的「先开 EDA、后开 Claude Code，必须手动点一次重连」。
   所有重连判断集中在 `advance()` 一处，别再散出去。
 - **连上之后扩展要主动 ping**（`KEEPALIVE_MS`）。往一个已关闭的 socket 上 `send` 会抛，
   这是对端消失时唯一能快速察觉的信号；没有它就得干等 11 秒的接收超时。
 - `register()` 遇到同 ID 且 readyState 是 **CONNECTING 或 OPEN** 的连接时，会
-  **立刻同步调用 `onConnected` 然后返回**——注意 CONNECTING 也算。
+  **立刻同步调用 `onConnected` 然后返回**：注意 CONNECTING 也算。
   所以「`onConnected` 被调了」≠「连上了」。phase 从 `connecting` 翻到 `online`
   必须发生在**收到第一帧**的时候，不能在 `onConnected` 里。
 - 反过来，这个复用语义让 `ensureLink()` 天然幂等：已经连着时再调就是个空操作。
@@ -84,12 +93,12 @@ eval Function fetch alert WebSocket XMLHttpRequest BroadcastChannel Worker …
 旧版留了一条「原生 WebSocket 兜底」，那条路在 EDA 3.x 上永远走不通，已删。
 
 `setTimeout` / `setInterval` 是有的（被代理到 `window.*`），但**心跳要用
-`sys_Timer.setIntervalTimer` 并固定 ID** —— 同 ID 重复注册会替换旧的，
+`sys_Timer.setIntervalTimer` 并固定 ID**，同 ID 重复注册会替换旧的，
 正好抵消「每次求值都装一次」。
 
 ## ⚠ 不变量 4：两份 protocol.ts 必须逐字一致
 
-`src/protocol.ts`（服务端）和 `jlc-bridge/src/protocol.ts`（扩展）是同一份协议抄了两遍——
+`src/protocol.ts`（服务端）和 `jlc-bridge/src/protocol.ts`（扩展）是同一份协议抄了两遍，
 扩展跑在沙箱里，没法 import 服务端的包。改一边必须改另一边。
 `PROTOCOL_VERSION` 对不上时 broker 会在日志里明说，不会静默乱跑。
 
@@ -123,28 +132,41 @@ eval Function fetch alert WebSocket XMLHttpRequest BroadcastChannel Worker …
 换算：`logical_x = 2560 + (physical_x - 2560) / 1.6`，`logical_y = physical_y / 1.6`。
 验证办法：`SetCursorPos` 之后用另一个 DPI 感知的工具读回光标位置对一下。
 
+顶部菜单栏和 JLC MCP 菜单里的项在 UI Automation 树里是 `Text` 元素，不算可交互控件：按名称找到元素，点它外框的中心。
+导入时的文件对话框：先把 `.eext` 的完整路径放进剪贴板，点「文件名」框，Ctrl+A、Ctrl+V，再点「打开」。
+
 ### EDA 菜单栏会溢出
 
 窗口不够宽时扩展菜单会被收进菜单栏最右边那个 `˅` 里，
 所以「顶部菜单没看到 JLC MCP」不一定是扩展没装。
 
-### EDA 扩展管理器可能整个卡住
+### 扩展管理器里导入、卸载没反应
 
-2026-08-04 遇到过：扩展管理器的**导入和卸载都毫无反应**——
-导入新包没反应，导入**已知能装的旧包**也没反应，卸载点了「确认」也没反应
-（`取消` 有反应，说明点击本身是到位的），同时工程「自动备份失败」。
-这是 EDA 那个会话的持久化子系统卡住了，不是包的问题。**重启 EDA 即可。**
+先看扩展是不是连着：连着的时候覆盖导入、卸载、停用都会在 `$v()` 里报错中断（见不变量 1），界面上没有任何提示。
+按「暂停桥接 → 导入 → 恢复桥接」来；已经点过导入、JLC MCP 菜单没了的，重启 EDA 之后再按这个顺序来。
 
-判断办法：看 `%LOCALAPPDATA%\LCEDA-Pro\cache.x64.3\IndexedDB\https_pro.lceda.cn_0.indexeddb.blob\1\00\`
-里那几个文件的时间戳——真的装进去了这些文件会更新。
+还有一种是 EDA 自己卡住：2026-09-29 连续导入几次之后，EDA 内部的 RPC（`/pro-mgr/api/other/getEditorVersion`、
+`/pro-mgr/api/project/get` 等）开始超时，JLC MCP 菜单点了不展开。重启 EDA 即可。
+
+判断导入有没有写进去：看 `%LOCALAPPDATA%\LCEDA-Pro\cache.x64.3\IndexedDB\https_pro.lceda.cn_0.indexeddb.blob\1\00\`
+里最新几个文件的时间戳和大小，真的装进去了会多出几个和 `jlc-bridge/dist/index.js` 一样大的文件。
+
+### 开了几个工程窗口时，命令只发给其中一个
+
+每个 EDA 窗口各跑一份扩展、各连一次 broker，broker 只把命令发给其中一个窗口。
+`npm run live` 读不到 PCB、`pcb_get_state` 报 `Cannot read properties of null (reading 'map')` 时，先看 PCB 是不是开在另一个窗口里。
 
 ### 想看扩展里发生了什么
 
-EDA 不给 console。三条路：
+EDA 界面上没有 console。四条路：
 
-1. 菜单「查看运行日志」——`hub.logs` 环形缓冲，最近 200 条
-2. `npm test` 的 `tests/extension.test.mjs`——把真实产物装进复刻的沙箱跑，能打断点
-3. `npm run live`——对着真 EDA 跑完整链路
+1. 菜单「查看运行日志」，`hub.logs` 环形缓冲，最近 200 条
+2. `npm test` 的 `tests/extension.test.mjs`，把真实产物装进复刻的沙箱跑，能打断点
+3. `npm run live`，对着真 EDA 跑完整链路
+4. 带调试端口启动 EDA：`lceda-pro.exe --remote-debugging-port=9229 --remote-debugging-address=127.0.0.1`，
+   再用 Chrome 调试协议连 `http://127.0.0.1:9229/json/list` 里的页面。`api.js` 抛的错看得到，
+   `globalThis.__JLC_BRIDGE_HUB_V2__` 也能直接读；每个 EDA 窗口是一个单独的页面，各有一份 hub。
+   查完正常重启一次 EDA，把端口关掉
 
 ### 图元 getter 以 `api-types.d.ts` 为准，焊盘 ID 是「元件 ID + 后缀」
 
@@ -187,22 +209,28 @@ BOM 标记按 `!!attrsMap['Add into BOM']` 算，值是 `"no"` 也读成 `true`�
 
 元件 `get(单个 ID)` 查不到时返回 `undefined`；`reset()` 遇到已被删掉的元件时读空记录，抛 TypeError。
 
+文本、属性的 `x`、`y` 是对齐锚点，只有居中对齐（`getState_AlignMode()` 为 5）时才在外框中心。
+`pcb.js` 的 TextModel 摆字时把字框按对齐方式放到锚点一侧，绕锚点转；底层上没勾镜像、顶层上勾了镜像的字
+再把相对锚点的 x 取反（`Lc()`），这种字绕锚点转的方向相反。坐标 y 轴向上，角度逆时针为正，
+`api.js` 只把坐标乘 10、把弧度换成度。自动避让的候选框按这套规则从真实外框推（见 `silkscreen.ts` 的 `candidateBox()`）。
+
 运行中的 EDA 加载的是哪一版 `pcb.js` / `api.js`，看 `assets/pro-versions/<版本>/editor.ini`。
 
 ---
 
 ## 常见任务
 
-**改了扩展**：`npm run build:ext` → 在 EDA 里重新导入 `.eext`（同 UUID 会覆盖）→
-`npm run live` 验证。菜单第一行的状态灯会自己变。
+**改了扩展**：`npm run build:ext` → EDA 菜单「JLC MCP → 暂停桥接」→ 扩展管理器导入 `.eext`（同 UUID 会覆盖）→
+点掉「安全提示」→「JLC MCP → 恢复桥接」→ `npm run live` 验证。不先暂停的话导入必然失败（见不变量 1）。
+跑的是哪一版看运行日志里的「检测到扩展代码已更新（旧 → 新）」，导入有没有写进去看 IndexedDB 的时间戳（见「环境坑」）。
 
 **改了 MCP server**：`npm run build` → **重启 Claude Code**（MCP 进程不会热重载）。
 
 **加一个新命令**：
 `jlc-bridge/src/commands/` 里写实现 → `registry.ts` 里加一行 →
-`src/tools/` 里加对应的 MCP 工具。**两边的参数名要对齐**——
+`src/tools/` 里加对应的 MCP 工具。**两边的参数名要对齐**，
 旧版栽过四次「参数名对不上，静默丢参数」，见 README 更新记录。
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
 
-**跑测试**：`npm test`（65 项）。每条断言都对应一个踩过的坑，别随手删。
+**跑测试**：`npm test`（70 项）。每条断言都对应一个踩过的坑，别随手删。

@@ -29,10 +29,11 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
 /**
  * @param {string} bundlePath 打包后的 index.js
  * @param {object} edaMock 假的 eda 对象
- * @returns {{ call: (fn: string, arg?: string) => Promise<void>, evaluations: () => number }}
+ * @returns {{ call: (fn: string, arg?: string) => Promise<void>, evaluations: () => number, reimport: (code: string) => void }}
  */
 export function createEdaRuntime(bundlePath, edaMock) {
   let evaluations = 0;
+  let readSource = () => readFileSync(bundlePath, 'utf8');
 
   // EDA 沙箱里被显式抹掉的浏览器能力。列在这里是为了让测试也踩到同样的限制——
   // 比如扩展代码里要是不小心用了 fetch / WebSocket / localStorage，测试就该炸。
@@ -87,8 +88,8 @@ export function createEdaRuntime(bundlePath, edaMock) {
 
   async function call(fnName, arg) {
     evaluations += 1;
-    // 每次都重新从磁盘读，和 EDA 一样（它每次从 IndexedDB 取 entry 文件）
-    const source = readFileSync(bundlePath, 'utf8');
+    // 每次都重新读，和 EDA 一样（它每次从 IndexedDB 取 entry 文件）
+    const source = readSource();
     const argExpr = arg === undefined ? 'undefined' : JSON.stringify(arg);
     const tail = `
 /**/
@@ -98,7 +99,15 @@ if (typeof ${fnName} === 'function') {${fnName}(${argExpr});} else if (edaEsbuil
     await fn(proxy);
   }
 
-  return { call, evaluations: () => evaluations, sandbox };
+  /**
+   * 在扩展管理器里覆盖导入之后，IndexedDB 里的 entry 文件换成了新代码，之后每次调用求值的都是它。
+   * EDA 导入前先卸载旧扩展，那一步见 createEdaMock 的 unloadExtension。
+   */
+  function reimport(code) {
+    readSource = () => code;
+  }
+
+  return { call, evaluations: () => evaluations, reimport, sandbox };
 }
 
 /**
@@ -228,16 +237,24 @@ export function createEdaMock(options = {}) {
   };
 
   /**
-   * 收摊。**每个用例跑完必须调**：扩展的心跳是个真的 setInterval，不清掉的话
-   * 上一个用例的心跳会继续跑，而它 getHub() 拿到的是同一个 globalThis 上的 hub，
-   * 于是去改下一个用例的状态 —— 表现是用例单跑过、一起跑就诡异地挂。
+   * 在扩展管理器里覆盖导入同 UUID 的扩展时，EDA 先把旧的那份卸载掉（api.js 的 mw → $v）：
+   * 清掉这个扩展装的全部 sys_Timer，关掉它的全部 sys_WebSocket 连接，关之前先摘掉 message / open 监听。
+   * globalThis 上挂的东西 EDA 不管，hub 原样留着。
+   * 这里模拟的是卸载顺利走完；3.2.166 的 $v 关连接时会报错中断，见 CLAUDE.md 不变量 1。
    */
-  const dispose = () => {
+  const unloadExtension = () => {
     for (const { handle } of state.intervals.values()) clearInterval(handle);
     state.intervals.clear();
     state.ws.onMessage = null;
     state.ws.onConnected = null;
   };
 
-  return { eda, state, dispose };
+  /**
+   * 收摊。**每个用例跑完必须调**：扩展的心跳是个真的 setInterval，不清掉的话
+   * 上一个用例的心跳会继续跑，而它 getHub() 拿到的是同一个 globalThis 上的 hub，
+   * 于是去改下一个用例的状态 —— 表现是用例单跑过、一起跑就诡异地挂。
+   */
+  const dispose = unloadExtension;
+
+  return { eda, state, dispose, unloadExtension };
 }
