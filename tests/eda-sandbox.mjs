@@ -240,6 +240,7 @@ export function createEdaMock(options = {}) {
    * 在扩展管理器里覆盖导入同 UUID 的扩展时，EDA 先把旧的那份卸载掉（api.js 的 mw → $v）：
    * 清掉这个扩展装的全部 sys_Timer，关掉它的全部 sys_WebSocket 连接，关之前先摘掉 message / open 监听。
    * globalThis 上挂的东西 EDA 不管，hub 原样留着。
+   * 这里模拟的是卸载顺利走完；3.2.166 的 $v 关连接时会报错中断，见 CLAUDE.md 不变量 1。
    */
   const unloadExtension = () => {
     for (const { handle } of state.intervals.values()) clearInterval(handle);

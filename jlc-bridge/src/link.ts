@@ -73,8 +73,8 @@ export const PERMISSION_HINT =
 export function ensureLink(): void {
   const hub = getHub();
 
-  // 重新导入扩展之后，hub 里的链路状态是上一版代码留下的：EDA 卸载旧扩展时已经关掉了它的连接，
-  // phase 却还停在 online。发现构建标识变了就把连接推倒重来，由新代码重新 register。
+  // 重新导入扩展之后，globalThis 上的 hub 还是上一版代码留下的。
+  // 发现构建标识变了就把连接推倒重来，由新代码重新 register，运行日志里记下新旧两版。
   if (hub.codeBuild && hub.codeBuild !== CODE_BUILD) {
     hubLog(`检测到扩展代码已更新（${hub.codeBuild} → ${CODE_BUILD}），重建连接`);
     hardReset(hub);

@@ -349,10 +349,11 @@ test('对端消失后靠主动 ping 尽快发现，而不是干等 11 秒', { sk
 });
 
 test('改了代码、版本号没变，重新导入后新代码立刻推倒重连', { skip }, async () => {
-  // EDA 覆盖导入同 UUID 的扩展时先卸载旧的（api.js 的 mw → $v：清定时器、关连接），
-  // 再按 onStartupFinished 激活新代码。globalThis 上的 hub 还在，phase 还是 online。
-  // CODE_BUILD 原来只取版本号，新代码认不出这是上一版留下的状态，要等保活 ping 发送失败才重连，
-  // 这几秒里菜单写着「已连接」，Claude 的命令却发不到 EDA。
+  // EDA 覆盖导入同 UUID 的扩展时先卸载旧的（api.js 的 mw → $v：清定时器、摘监听、关连接），
+  // 再按 onStartupFinished 激活新代码。globalThis 上的 hub 原样留着，phase 还是 online。
+  // CODE_BUILD 原来只取版本号，版本号没变时新代码认不出这是上一版留下的状态。
+  // 3.2.166 的 $v 关连接时会报错中断（见 CLAUDE.md 不变量 1），真机上要先暂停桥接再导入；
+  // 这里模拟的是卸载顺利走完的情况。
   const { compile } = createRequire(import.meta.url)('../jlc-bridge/build/compile.js');
   const { runtime, state, unloadExtension } = boot();
   await runtime.call('activate', 'onStartupFinished');

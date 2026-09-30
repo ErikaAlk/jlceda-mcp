@@ -42,13 +42,17 @@ Claude Code ⇄(stdio) mcp-server ⇄(ws://127.0.0.1:18800/ws/bridge) JLC MCP �
 所以：**所有跨调用的状态一律挂在 `hub.ts` 的 `globalThis.__JLC_BRIDGE_HUB_V2__` 上**，
 每个导出函数第一件事都是 `boot()`（幂等）。别写 `let connected = false` 这种。
 
-在扩展管理器里覆盖导入同 UUID 的扩展时，EDA 先卸载旧的那份（`api.js` 的 `mw()` → `$v()`：清掉它的 `sys_Timer`，
-摘掉 `sys_WebSocket` 的 message / open 监听再关连接），再加载新代码，已登录时紧接着按 `onStartupFinished` 激活（`dw()` → `Ig()`）。
-`globalThis` 上的 hub 不归 EDA 管，原样留着，新代码读到的 `phase` 还是上一版留下的 `online`。
-`link.ts` 靠 `hub.codeBuild !== CODE_BUILD` 发现这件事并推倒重连。别删。
-`CODE_BUILD` 是「版本号+代码哈希」，哈希由 `jlc-bridge/build/compile.js` 在构建时对打包产物取 SHA-256 注入，
-改了代码、版本号不动也会变。哈希必须跟着代码变：新代码认不出 hub 是旧代码留下的，就要等保活 ping 发送失败才重连，
-这几秒里菜单写着「已连接」，Claude 的命令却发不到 EDA。
+在扩展管理器里覆盖导入同 UUID 的扩展时，EDA 先卸载旧的那份（`api.js` 的 `mw()` → `$v()`），再写入新包、加载新代码，
+已登录时紧接着按 `onStartupFinished` 激活（`dw()` → `Ig()`）。`$v()` 依次删菜单、清掉这个扩展的 `sys_Timer`，
+再对它的每条 `sys_WebSocket` 连接摘掉 message / open 监听、调 `WebSocket.close(undefined, 原因)`。
+3.2.166（`pro-api` 0.3.4.b3076052）里这一调用会被 Chromium 拒绝（`InvalidAccessError`，关闭码 0 不合法），`$v()` 在这里中断：
+新包没写进去，JLC MCP 菜单没了，旧扩展停在卸载了一半的状态，只能重启 EDA。卸载、停用扩展走的也是 `$v()`，一样会失败。
+所以**扩展连着的时候不能覆盖导入**：先点「暂停桥接」（`pause()` → `hardReset()` 用不带参数的 `close()` 把连接从 EDA 的连接表里摘掉），
+导入之后再点「恢复桥接」。这个顺序 2026-09-29 在真机上连续导入三次都成功，报错也是那天用调试端口抓到的（见「想看扩展里发生了什么」）。
+
+`globalThis` 上的 hub 不归 EDA 管，导入前后是同一份，新代码拿到的是上一版留下的状态。
+`link.ts` 靠 `hub.codeBuild !== CODE_BUILD` 发现这件事，推倒重连，并在运行日志里记一条「检测到扩展代码已更新（旧 → 新）」。别删。
+`CODE_BUILD` 是「版本号+代码哈希」，哈希由 `jlc-bridge/build/compile.js` 在构建时对打包产物取 SHA-256 注入，改了代码、版本号不动也会变。
 
 ## ⚠ 不变量 2：`sys_WebSocket` 没有 close / error 回调
 
@@ -128,28 +132,41 @@ eval Function fetch alert WebSocket XMLHttpRequest BroadcastChannel Worker …
 换算：`logical_x = 2560 + (physical_x - 2560) / 1.6`，`logical_y = physical_y / 1.6`。
 验证办法：`SetCursorPos` 之后用另一个 DPI 感知的工具读回光标位置对一下。
 
+顶部菜单栏和 JLC MCP 菜单里的项在 UI Automation 树里是 `Text` 元素，不算可交互控件：按名称找到元素，点它外框的中心。
+导入时的文件对话框：先把 `.eext` 的完整路径放进剪贴板，点「文件名」框，Ctrl+A、Ctrl+V，再点「打开」。
+
 ### EDA 菜单栏会溢出
 
 窗口不够宽时扩展菜单会被收进菜单栏最右边那个 `˅` 里，
 所以「顶部菜单没看到 JLC MCP」不一定是扩展没装。
 
-### EDA 扩展管理器可能整个卡住
+### 扩展管理器里导入、卸载没反应
 
-2026-08-04 遇到过：扩展管理器的**导入和卸载都毫无反应**——
-导入新包没反应，导入**已知能装的旧包**也没反应，卸载点了「确认」也没反应
-（`取消` 有反应，说明点击本身是到位的），同时工程「自动备份失败」。
-这是 EDA 那个会话的持久化子系统卡住了，不是包的问题。**重启 EDA 即可。**
+先看扩展是不是连着：连着的时候覆盖导入、卸载、停用都会在 `$v()` 里报错中断（见不变量 1），界面上没有任何提示。
+按「暂停桥接 → 导入 → 恢复桥接」来；已经点过导入、JLC MCP 菜单没了的，重启 EDA 之后再按这个顺序来。
 
-判断办法：看 `%LOCALAPPDATA%\LCEDA-Pro\cache.x64.3\IndexedDB\https_pro.lceda.cn_0.indexeddb.blob\1\00\`
-里那几个文件的时间戳——真的装进去了这些文件会更新。
+还有一种是 EDA 自己卡住：2026-09-29 连续导入几次之后，EDA 内部的 RPC（`/pro-mgr/api/other/getEditorVersion`、
+`/pro-mgr/api/project/get` 等）开始超时，JLC MCP 菜单点了不展开。重启 EDA 即可。
+
+判断导入有没有写进去：看 `%LOCALAPPDATA%\LCEDA-Pro\cache.x64.3\IndexedDB\https_pro.lceda.cn_0.indexeddb.blob\1\00\`
+里最新几个文件的时间戳和大小，真的装进去了会多出几个和 `jlc-bridge/dist/index.js` 一样大的文件。
+
+### 开了几个工程窗口时，命令只发给其中一个
+
+每个 EDA 窗口各跑一份扩展、各连一次 broker，broker 只把命令发给其中一个窗口。
+`npm run live` 读不到 PCB、`pcb_get_state` 报 `Cannot read properties of null (reading 'map')` 时，先看 PCB 是不是开在另一个窗口里。
 
 ### 想看扩展里发生了什么
 
-EDA 不给 console。三条路：
+EDA 界面上没有 console。四条路：
 
 1. 菜单「查看运行日志」——`hub.logs` 环形缓冲，最近 200 条
 2. `npm test` 的 `tests/extension.test.mjs`——把真实产物装进复刻的沙箱跑，能打断点
 3. `npm run live`——对着真 EDA 跑完整链路
+4. 带调试端口启动 EDA：`lceda-pro.exe --remote-debugging-port=9229 --remote-debugging-address=127.0.0.1`，
+   再用 Chrome 调试协议连 `http://127.0.0.1:9229/json/list` 里的页面。`api.js` 抛的错看得到，
+   `globalThis.__JLC_BRIDGE_HUB_V2__` 也能直接读；每个 EDA 窗口是一个单独的页面，各有一份 hub。
+   查完正常重启一次 EDA，把端口关掉
 
 ### 图元 getter 以 `api-types.d.ts` 为准，焊盘 ID 是「元件 ID + 后缀」
 
@@ -192,10 +209,9 @@ EDA 拒绝写入时 `done()` 抛的「对象参数不正确，无法应用到画
 
 ## 常见任务
 
-**改了扩展**：`npm run build:ext` → 在 EDA 里重新导入 `.eext`（同 UUID 会覆盖）→
-`npm run live` 验证。菜单第一行的状态灯会自己变。
-新代码激活时发现构建标识变了会自己重连，运行日志里记一条「检测到扩展代码已更新」。
-没登录时 EDA 导入后不激活扩展，要点一下任意菜单项，新代码才开始跑。
+**改了扩展**：`npm run build:ext` → EDA 菜单「JLC MCP → 暂停桥接」→ 扩展管理器导入 `.eext`（同 UUID 会覆盖）→
+点掉「安全提示」→「JLC MCP → 恢复桥接」→ `npm run live` 验证。不先暂停的话导入必然失败（见不变量 1）。
+跑的是哪一版看运行日志里的「检测到扩展代码已更新（旧 → 新）」，导入有没有写进去看 IndexedDB 的时间戳（见「环境坑」）。
 
 **改了 MCP server**：`npm run build` → **重启 Claude Code**（MCP 进程不会热重载）。
 
