@@ -31,7 +31,7 @@ Claude Code ⇄(stdio) mcp-server ⇄(ws://127.0.0.1:18800/ws/bridge) JLC MCP �
 也就是说：
 
 > **模块级的 `let` / 闭包变量，在两次菜单点击之间不保留。**
-> 启动激活、点「状态」、点「暂停」——每一次都是一个全新的模块实例。
+> 启动激活、点「状态」、点「暂停」，每一次都是一个全新的模块实例。
 
 能跨越重新求值活下来的只有三样：
 
@@ -56,13 +56,13 @@ Claude Code ⇄(stdio) mcp-server ⇄(ws://127.0.0.1:18800/ws/bridge) JLC MCP �
 - **连不上时同样一个回调都不给**：对端不在时 `new WebSocket(...)` 照样构造成功，
   失败是异步的，`onConnected` 永远不来。所以 `connecting` **必须有超时**
   （`CONNECT_TIMEOUT_MS`），超了就 `hardReset` 重来。
-  少了这条，phase 会永远停在 `connecting`、心跳再也不会重新 `register`——
+  少了这条，phase 会永远停在 `connecting`、心跳再也不会重新 `register`，
   表现就是用户报的「先开 EDA、后开 Claude Code，必须手动点一次重连」。
   所有重连判断集中在 `advance()` 一处，别再散出去。
 - **连上之后扩展要主动 ping**（`KEEPALIVE_MS`）。往一个已关闭的 socket 上 `send` 会抛，
   这是对端消失时唯一能快速察觉的信号；没有它就得干等 11 秒的接收超时。
 - `register()` 遇到同 ID 且 readyState 是 **CONNECTING 或 OPEN** 的连接时，会
-  **立刻同步调用 `onConnected` 然后返回**——注意 CONNECTING 也算。
+  **立刻同步调用 `onConnected` 然后返回**：注意 CONNECTING 也算。
   所以「`onConnected` 被调了」≠「连上了」。phase 从 `connecting` 翻到 `online`
   必须发生在**收到第一帧**的时候，不能在 `onConnected` 里。
 - 反过来，这个复用语义让 `ensureLink()` 天然幂等：已经连着时再调就是个空操作。
@@ -84,12 +84,12 @@ eval Function fetch alert WebSocket XMLHttpRequest BroadcastChannel Worker …
 旧版留了一条「原生 WebSocket 兜底」，那条路在 EDA 3.x 上永远走不通，已删。
 
 `setTimeout` / `setInterval` 是有的（被代理到 `window.*`），但**心跳要用
-`sys_Timer.setIntervalTimer` 并固定 ID** —— 同 ID 重复注册会替换旧的，
+`sys_Timer.setIntervalTimer` 并固定 ID**，同 ID 重复注册会替换旧的，
 正好抵消「每次求值都装一次」。
 
 ## ⚠ 不变量 4：两份 protocol.ts 必须逐字一致
 
-`src/protocol.ts`（服务端）和 `jlc-bridge/src/protocol.ts`（扩展）是同一份协议抄了两遍——
+`src/protocol.ts`（服务端）和 `jlc-bridge/src/protocol.ts`（扩展）是同一份协议抄了两遍，
 扩展跑在沙箱里，没法 import 服务端的包。改一边必须改另一边。
 `PROTOCOL_VERSION` 对不上时 broker 会在日志里明说，不会静默乱跑。
 
@@ -130,21 +130,21 @@ eval Function fetch alert WebSocket XMLHttpRequest BroadcastChannel Worker …
 
 ### EDA 扩展管理器可能整个卡住
 
-2026-08-04 遇到过：扩展管理器的**导入和卸载都毫无反应**——
+2026-08-04 遇到过：扩展管理器的**导入和卸载都毫无反应**，
 导入新包没反应，导入**已知能装的旧包**也没反应，卸载点了「确认」也没反应
 （`取消` 有反应，说明点击本身是到位的），同时工程「自动备份失败」。
 这是 EDA 那个会话的持久化子系统卡住了，不是包的问题。**重启 EDA 即可。**
 
 判断办法：看 `%LOCALAPPDATA%\LCEDA-Pro\cache.x64.3\IndexedDB\https_pro.lceda.cn_0.indexeddb.blob\1\00\`
-里那几个文件的时间戳——真的装进去了这些文件会更新。
+里那几个文件的时间戳，真的装进去了这些文件会更新。
 
 ### 想看扩展里发生了什么
 
 EDA 不给 console。三条路：
 
-1. 菜单「查看运行日志」——`hub.logs` 环形缓冲，最近 200 条
-2. `npm test` 的 `tests/extension.test.mjs`——把真实产物装进复刻的沙箱跑，能打断点
-3. `npm run live`——对着真 EDA 跑完整链路
+1. 菜单「查看运行日志」，`hub.logs` 环形缓冲，最近 200 条
+2. `npm test` 的 `tests/extension.test.mjs`，把真实产物装进复刻的沙箱跑，能打断点
+3. `npm run live`，对着真 EDA 跑完整链路
 
 ### 图元 getter 以 `api-types.d.ts` 为准，焊盘 ID 是「元件 ID + 后缀」
 
@@ -169,7 +169,7 @@ EDA 安装目录 `resources/app/assets/pro-api/<版本>/api-types.d.ts` 写清�
 
 **加一个新命令**：
 `jlc-bridge/src/commands/` 里写实现 → `registry.ts` 里加一行 →
-`src/tools/` 里加对应的 MCP 工具。**两边的参数名要对齐**——
+`src/tools/` 里加对应的 MCP 工具。**两边的参数名要对齐**，
 旧版栽过四次「参数名对不上，静默丢参数」，见 README 更新记录。
 
 **改协议**：两份 `protocol.ts` 一起改，`PROTOCOL_VERSION` 加一。
